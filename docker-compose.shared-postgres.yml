@@ -1,0 +1,145 @@
+# MailPlus 共用一个 PostgreSQL 容器的多开模板。
+#
+# 默认是单开：只启用 app + postgres + db-init。
+# 多开时不要再复制 postgres 服务，只复制/取消注释 app_1、app_2 这类应用服务。
+#
+# 多开需要改的地方：
+# 1. app 容器名不能重复：mail、mail_1、mail_2 ...
+# 2. 前端宿主机端口不能重复：4399、4499、4599 ...
+# 3. DATABASE_URL 最后的数据库名不能重复：mail_admin、mail_admin_1、mail_admin_2 ...
+# 4. db-init 里如果增加更多实例，要把新数据库名也加进去。
+#
+# 多开不要改/不要复制的地方：
+# 1. postgres 服务只保留一个。
+# 2. postgres 容器名只保留 mail-postgres。
+# 3. postgres_data 卷只保留一个。
+# 4. DATABASE_URL 里的服务名 postgres 和端口 5432 不用改。
+
+name: mail-shared-postgres
+
+services:
+  # 第一套 MailPlus，默认启用。
+  app:
+    container_name: mail
+    image: douliu676/mailplus:v1.0.0
+    restart: unless-stopped
+    ports:
+      # 第一套前端访问端口：http://服务器IP:4399
+      - "4399:4399"
+      # 后端 4400 只在容器内部使用，不暴露到宿主机。
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4400
+      FRONTEND_HOST: 0.0.0.0
+      FRONTEND_PORT: 4399
+      BACKEND_URL: http://127.0.0.1:4400
+      # 第一套数据库名：mail_admin。
+      DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin?sslmode=disable"
+      GIN_MODE: release
+      TZ: "${TZ:-Asia/Shanghai}"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    networks:
+      - mail-network
+
+  # 第二套 MailPlus。
+  # 使用时删除这一整段前面的 #，并确认 container_name、ports、DATABASE_URL 数据库名都不重复。
+  # app_1:
+  #   container_name: mail_1
+  #   image: douliu676/mailplus:v1.0.0
+  #   restart: unless-stopped
+  #   ports:
+  #     # 第二套前端访问端口：http://服务器IP:4499
+  #     - "4499:4399"
+  #     # 后端 4400 只在容器内部使用，不暴露到宿主机。
+  #   environment:
+  #     HOST: 0.0.0.0
+  #     PORT: 4400
+  #     FRONTEND_HOST: 0.0.0.0
+  #     FRONTEND_PORT: 4399
+  #     BACKEND_URL: http://127.0.0.1:4400
+  #     # 第二套数据库名：mail_admin_1。
+  #     DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin_1?sslmode=disable"
+  #     GIN_MODE: release
+  #     TZ: "${TZ:-Asia/Shanghai}"
+  #   depends_on:
+  #     db-init:
+  #       condition: service_completed_successfully
+  #   networks:
+  #     - mail-network
+
+  # 第三套 MailPlus。
+  # 使用时删除这一整段前面的 #，并确认 container_name、ports、DATABASE_URL 数据库名都不重复。
+  # app_2:
+  #   container_name: mail_2
+  #   image: douliu676/mailplus:v1.0.0
+  #   restart: unless-stopped
+  #   ports:
+  #     # 第三套前端访问端口：http://服务器IP:4599
+  #     - "4599:4399"
+  #     # 后端 4400 只在容器内部使用，不暴露到宿主机。
+  #   environment:
+  #     HOST: 0.0.0.0
+  #     PORT: 4400
+  #     FRONTEND_HOST: 0.0.0.0
+  #     FRONTEND_PORT: 4399
+  #     BACKEND_URL: http://127.0.0.1:4400
+  #     # 第三套数据库名：mail_admin_2。
+  #     DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin_2?sslmode=disable"
+  #     GIN_MODE: release
+  #     TZ: "${TZ:-Asia/Shanghai}"
+  #   depends_on:
+  #     db-init:
+  #       condition: service_completed_successfully
+  #   networks:
+  #     - mail-network
+
+  # 共用的 PostgreSQL，只保留一个。
+  postgres:
+    container_name: mail-postgres
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      # PostgreSQL 首次初始化时会创建这个默认数据库。
+      POSTGRES_DB: mail_admin
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mail_admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - mail-network
+
+  # 数据库初始化器：确保多开需要的数据库存在，执行完会自动退出。
+  # 如果增加第四套 app_3，就在下面 for db 那一行末尾加 mail_admin_3。
+  db-init:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    command: >
+      sh -c "
+        for db in mail_admin mail_admin_1 mail_admin_2; do
+          psql -h postgres -U postgres -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname = '$$db'\" | grep -q 1 ||
+          psql -h postgres -U postgres -d postgres -c \"CREATE DATABASE \\\"$$db\\\"\";
+        done
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - mail-network
+
+volumes:
+  postgres_data:
+
+networks:
+  mail-network:
+    driver: bridge
