@@ -430,6 +430,10 @@ linux/arm/v7
 
 会。`douliu676/mailplus` 是多架构镜像，Docker 会根据服务器 CPU 自动拉取对应版本。
 
+### 这个程序推荐用什么 PostgreSQL 版本？
+
+推荐使用 **PostgreSQL 16**，镜像标签为 `postgres:16-alpine`。
+
 ### 可以用 postgres:latest 吗？
 
 不建议。数据库大版本升级可能导致已有数据卷无法直接启动。默认使用 `postgres:16-alpine` 更稳。
