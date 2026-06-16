@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -32,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -1005,8 +1007,29 @@ func main() {
 		host = "127.0.0.1"
 	}
 
-	if err := app.Run(net.JoinHostPort(host, port)); err != nil {
-		panic(err)
+	addr := net.JoinHostPort(host, port)
+	server := &http.Server{Addr: addr, Handler: app}
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.ListenAndServe()
+	}()
+
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(shutdownSignal)
+
+	select {
+	case err := <-serverErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			panic(err)
+		}
+	case <-shutdownSignal:
+		proxyRuntime.stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			panic(err)
+		}
 	}
 }
 
@@ -1421,6 +1444,7 @@ func (s *appState) restoreDatabaseBackup(c *gin.Context) {
 func scheduleRestoreRestart() {
 	go func() {
 		time.Sleep(restoreRestartDelay)
+		defaultProxyRuntime.stop()
 		os.Exit(restoreRestartExitCode)
 	}()
 }
