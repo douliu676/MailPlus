@@ -1,0 +1,12 @@
+**/.git
+**/.env
+**/*.log
+**/*.out
+**/*.err
+**/tmp
+**/temp
+qianduan/node_modules
+qianduan/dist
+houduan/tmp
+houduan/temp
+houduan/bin/xray/windows-amd64

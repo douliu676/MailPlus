@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <script src="/api/settings/bootstrap.js" vite-ignore></script>
+    <script>
+      ;(() => {
+        try {
+          const raw = localStorage.getItem('mail_public_settings')
+          const settings = window.__APP_PUBLIC_SETTINGS__ || (raw ? JSON.parse(raw) : {})
+          const logo = settings.site_logo || ''
+          if (!logo) return
+          const link = document.querySelector('link[rel="icon"]')
+          if (link) {
+            link.href = logo
+            link.type = logo.startsWith('data:image/svg') || logo.endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+          }
+        } catch {}
+      })()
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title></title>
+    <script>
+      ;(() => {
+        try {
+          const raw = localStorage.getItem('mail_public_settings')
+          const settings = window.__APP_PUBLIC_SETTINGS__ || (raw ? JSON.parse(raw) : {})
+          const siteName = settings.site_name || 'douliu\u90ae\u7bb1\u7ba1\u7406\u7cfb\u7edf'
+          const pageTitles = {
+            '/home': '\u9996\u9875',
+            '/login': 'Login',
+            '/imap/mail': 'IMAP \u6536\u4ef6',
+            '/outlook/mail': 'Outlook \u6536\u4ef6',
+            '/admin': '\u4eea\u8868\u76d8',
+            '/admin/dashboard': '\u4eea\u8868\u76d8',
+            '/admin/users': '\u7528\u6237\u7ba1\u7406',
+            '/admin/accounts': 'IMAP\u90ae\u7bb1\u7ba1\u7406',
+            '/admin/outlook-accounts': '\u5fae\u8f6f\u90ae\u7bb1\u7ba1\u7406',
+            '/admin/proxy-system': '\u4ee3\u7406\u7cfb\u7edf',
+            '/admin/card-keys': '\u5361\u5bc6\u7cfb\u7edf',
+            '/admin/card-key-logs': '\u5361\u5bc6\u65e5\u5fd7',
+            '/admin/settings': '\u7cfb\u7edf\u8bbe\u7f6e',
+            '/admin/profile': '\u4e2a\u4eba\u8d44\u6599',
+          }
+          const path = window.location.pathname.replace(/\/+$/, '') || '/home'
+          const pageTitle = pageTitles[path] || (path.startsWith('/mail/keys=') ? 'API\u53d6\u4ef6' : '\u9875\u9762\u4e0d\u5b58\u5728')
+          document.title = pageTitle ? `${pageTitle} - ${siteName}` : siteName
+        } catch {}
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
