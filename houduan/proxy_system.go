@@ -1217,7 +1217,7 @@ func (r *proxyRuntime) ensureForSelected(ctx context.Context, extraNodeIDs ...in
 	if r.cmd != nil && r.configHash == hash && r.processRunningLocked() {
 		return nil
 	}
-	r.stopLocked()
+	r.stopLocked(false)
 
 	bin, err := xrayBinaryPath()
 	if err != nil {
@@ -1229,6 +1229,20 @@ func (r *proxyRuntime) ensureForSelected(ctx context.Context, extraNodeIDs ...in
 		r.lastError = err.Error()
 		return err
 	}
+	if err := r.startXrayLocked(bin, configPath, hash); err == nil {
+		return nil
+	}
+	if err := cleanupMailAdminXrayProcesses(); err != nil {
+		fmt.Fprintf(os.Stderr, "cleanup stale xray process: %v\n", err)
+	}
+	r.cmd = nil
+	r.configPath = ""
+	r.configHash = ""
+	r.startedAt = time.Time{}
+	return r.startXrayLocked(bin, configPath, hash)
+}
+
+func (r *proxyRuntime) startXrayLocked(bin, configPath, hash string) error {
 	cmd := exec.CommandContext(context.Background(), bin, "run", "-config", configPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -1265,12 +1279,17 @@ func (r *proxyRuntime) setLastError(err error) {
 func (r *proxyRuntime) stop() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.stopLocked()
+	r.stopLocked(true)
 }
 
-func (r *proxyRuntime) stopLocked() {
+func (r *proxyRuntime) stopLocked(cleanStale bool) {
 	if r.cmd != nil && r.cmd.Process != nil && r.processRunningLocked() {
 		_ = r.cmd.Process.Kill()
+	}
+	if cleanStale {
+		if err := cleanupMailAdminXrayProcesses(); err != nil {
+			fmt.Fprintf(os.Stderr, "cleanup stale xray process: %v\n", err)
+		}
 	}
 	r.cmd = nil
 	r.configHash = ""
@@ -1460,6 +1479,56 @@ func writeXrayConfig(config []byte) (string, error) {
 	}
 	path := filepath.Join(dir, "config.json")
 	return path, os.WriteFile(path, config, 0600)
+}
+
+func cleanupMailAdminXrayProcesses() error {
+	switch runtime.GOOS {
+	case "windows":
+		return cleanupMailAdminXrayProcessesWindows()
+	default:
+		return cleanupMailAdminXrayProcessesProc()
+	}
+}
+
+func cleanupMailAdminXrayProcessesWindows() error {
+	script := `$targets = Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'xray.exe' -and $_.CommandLine -and $_.CommandLine -like '*mail-admin-xray*config.json*' }; foreach ($p in $targets) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }`
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	return cmd.Run()
+}
+
+func cleanupMailAdminXrayProcessesProc() error {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || len(cmdline) == 0 {
+			continue
+		}
+		text := strings.ReplaceAll(string(cmdline), "\x00", " ")
+		firstArg := strings.TrimSpace(strings.Split(text, " ")[0])
+		if !strings.Contains(strings.ToLower(filepath.Base(firstArg)), "xray") {
+			continue
+		}
+		if !strings.Contains(text, "mail-admin-xray") || !strings.Contains(text, "config.json") {
+			continue
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Kill()
+		}
+	}
+	return nil
 }
 
 func xrayBinaryPath() (string, error) {
