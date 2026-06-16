@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -22,8 +23,11 @@ import (
 	"net/smtp"
 	"net/url"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,6 +65,10 @@ const (
 	updateCheckMaxBodySize = 1 << 20
 	updateCheckMaxAttempts = 3
 	updateCheckRetryDelay  = 600 * time.Millisecond
+	databaseBackupTimeout  = 10 * time.Minute
+	databaseRestoreTimeout = 30 * time.Minute
+	restoreRestartDelay    = 1500 * time.Millisecond
+	restoreRestartExitCode = 42
 	githubLatestReleaseAPI = "https://api.github.com/repos/%s/releases/latest"
 	githubLatestReleaseWeb = "https://github.com/%s/releases/latest"
 )
@@ -73,7 +81,7 @@ var (
 // Override these at build time with:
 // -ldflags "-X main.appVersion=v1.2.3 -X main.appUpdateGitHubRepo=owner/repo"
 var (
-	appVersion          = "v1.0.0"
+	appVersion          = "v1.0.1"
 	appUpdateGitHubRepo = "douliu676/MailPlus"
 )
 
@@ -112,6 +120,15 @@ var removedSystemSettingKeys = []string{
 	"smtp_from_email",
 	"smtp_from_name",
 	"smtp_use_tls",
+	"backup_s3_endpoint",
+	"backup_s3_region",
+	"backup_s3_bucket",
+	"backup_s3_prefix",
+	"backup_s3_access_key_id",
+	"backup_s3_secret_access_key",
+	"backup_s3_force_path_style",
+	"backup_schedule_cron_expr",
+	"backup_schedule_retain_days",
 }
 
 type appState struct {
@@ -121,6 +138,7 @@ type appState struct {
 	tasks        *taskStore
 	proxies      *proxyRuntime
 	updates      *updateCheckCache
+	backups      *backupScheduler
 }
 
 type authSession struct {
@@ -238,6 +256,43 @@ WHERE id = $1
 	task.CreatedAt = createdAt.Format(time.RFC3339)
 	task.UpdatedAt = updatedAt.Format(time.RFC3339)
 	return task, true
+}
+
+func (s *taskStore) list(limit int) ([]backgroundTask, error) {
+	db, err := sql.Open("postgres", s.databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT id, type, status, total, done, success, failed, message, result_path, result_name, result_cleanup_after, created_at, updated_at
+FROM background_tasks
+ORDER BY updated_at DESC
+LIMIT $1
+`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tasks := make([]backgroundTask, 0)
+	for rows.Next() {
+		var task backgroundTask
+		var createdAt, updatedAt time.Time
+		var cleanupAfter sql.NullTime
+		if err := rows.Scan(&task.ID, &task.Type, &task.Status, &task.Total, &task.Done, &task.Success, &task.Failed, &task.Message, &task.ResultPath, &task.FileName, &cleanupAfter, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		if task.Status == "success" && task.ResultPath != "" {
+			task.DownloadURL = "/api/admin/tasks/" + task.ID + "/download"
+		}
+		if cleanupAfter.Valid {
+			task.ResultCleanupAfter = cleanupAfter.Time.Format(time.RFC3339)
+		}
+		task.CreatedAt = createdAt.Format(time.RFC3339)
+		task.UpdatedAt = updatedAt.Format(time.RFC3339)
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }
 
 func (s *taskStore) update(id string, update func(*backgroundTask)) {
@@ -810,12 +865,16 @@ func main() {
 	proxyRuntime := defaultProxyRuntime
 	defer proxyRuntime.stop()
 	state := &appState{db: db, sessions: newSessionStore(), outlookOAuth: newOutlookOAuthStore(), tasks: newTaskStore(), proxies: proxyRuntime, updates: newUpdateCheckCache()}
+	state.backups = newBackupScheduler(state)
 	taskCleanupStop := make(chan struct{})
 	defer close(taskCleanupStop)
 	go state.tasks.runResultCleanupLoop(taskCleanupStop)
 	cardKeyLogCleanupStop := make(chan struct{})
 	defer close(cardKeyLogCleanupStop)
 	go state.runCardKeyUseLogCleanupLoop(cardKeyLogCleanupStop)
+	backupSchedulerStop := make(chan struct{})
+	defer close(backupSchedulerStop)
+	go state.backups.run(backupSchedulerStop)
 	app := gin.Default()
 
 	app.GET("/imap/mail/:key/all/:email", state.getQuickMailIMAPPlain)
@@ -852,6 +911,14 @@ func main() {
 			adminAPI.GET("/settings", state.getAdminSettings)
 			adminAPI.PUT("/settings", state.updateAdminSettings)
 			adminAPI.GET("/update-check", state.checkAppUpdate)
+			adminAPI.GET("/database-backup/files", state.listDatabaseBackupFiles)
+			adminAPI.GET("/database-backup/files/:name", state.downloadDatabaseBackupFile)
+			adminAPI.DELETE("/database-backup/files/:name", state.deleteDatabaseBackupFile)
+			adminAPI.POST("/database-backup/manual-task", state.createManualDatabaseBackupTask)
+			adminAPI.POST("/database-backup/webdav-test", state.testBackupWebDAV)
+			adminAPI.GET("/database-backup/export", state.exportDatabaseBackup)
+			adminAPI.POST("/database-backup/restore", state.restoreDatabaseBackup)
+			adminAPI.GET("/tasks", state.listTasks)
 			adminAPI.GET("/tasks/:id", state.getTask)
 			adminAPI.GET("/tasks/:id/download", state.downloadTaskResult)
 			adminAPI.DELETE("/tasks/:id", state.deleteTask)
@@ -877,7 +944,6 @@ func main() {
 			adminAPI.DELETE("/card-keys/:id", state.deleteCardKey)
 			adminAPI.GET("/card-key-logs", state.listCardKeyUseLogs)
 			adminAPI.DELETE("/card-key-logs", state.clearCardKeyUseLogs)
-			adminAPI.GET("/backup/export", state.exportBackup)
 			adminAPI.GET("/mail-groups", state.listMailGroups)
 			adminAPI.POST("/mail-groups", state.createMailGroup)
 			adminAPI.PUT("/mail-groups/:id", state.updateMailGroup)
@@ -1138,34 +1204,1124 @@ func (s *appState) updateAdminSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: settings, Msg: "ok"})
 }
 
-func (s *appState) exportBackup(c *gin.Context) {
-	ctx := c.Request.Context()
-	settings, err := s.readSettings(ctx)
+func (s *appState) exportDatabaseBackup(c *gin.Context) {
+	tool, err := postgresToolPath("pg_dump")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u5bfc\u51fa\u5907\u4efd\u5931\u8d25"})
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: err.Error()})
 		return
 	}
 
-	items, err := s.db.User.Query().Order(ent.Asc(user.FieldID)).All(ctx)
+	temp, err := os.CreateTemp("", "mailplus-db-backup-*.dump")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u5bfc\u51fa\u5907\u4efd\u5931\u8d25"})
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "创建备份临时文件失败"})
+		return
+	}
+	tempPath := temp.Name()
+	_ = temp.Close()
+	defer os.Remove(tempPath)
+
+	dsn := databaseURL()
+	ctx, cancel := context.WithTimeout(c.Request.Context(), databaseBackupTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(
+		ctx,
+		tool,
+		"--format=custom",
+		"--clean",
+		"--if-exists",
+		"--no-owner",
+		"--no-privileges",
+		"--file", tempPath,
+		"--dbname", dsn,
+	)
+	cmd.Env = postgresToolEnv(tool)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: postgresCommandMessage("数据库备份失败", dsn, output, err, ctx.Err())})
 		return
 	}
 
-	users := make([]adminUserResponse, 0, len(items))
-	for _, item := range items {
-		users = append(users, toAdminUser(item))
+	filename := fmt.Sprintf("mailplus-db-backup-%s.dump", time.Now().Format("20060102-150405"))
+	c.FileAttachment(tempPath, filename)
+}
+
+type databaseBackupFileResponse struct {
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	CreatedAt  string `json:"created_at"`
+	ModifiedAt string `json:"modified_at"`
+	Directory  string `json:"directory"`
+}
+
+func (s *appState) listDatabaseBackupFiles(c *gin.Context) {
+	files, err := collectDatabaseBackupFiles()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "读取备份文件失败"})
+		return
+	}
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: files, Msg: "ok"})
+}
+
+func (s *appState) downloadDatabaseBackupFile(c *gin.Context) {
+	filePath, filename, ok := resolveDatabaseBackupFile(c.Param("name"))
+	if !ok {
+		c.JSON(http.StatusNotFound, apiResponse{Code: 404, Msg: "备份文件不存在"})
+		return
+	}
+	c.FileAttachment(filePath, filename)
+}
+
+func (s *appState) deleteDatabaseBackupFile(c *gin.Context) {
+	filePath, _, ok := resolveDatabaseBackupFile(c.Param("name"))
+	if !ok {
+		c.JSON(http.StatusNotFound, apiResponse{Code: 404, Msg: "备份文件不存在"})
+		return
+	}
+	if err := os.Remove(filePath); err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "删除备份文件失败"})
+		return
+	}
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Msg: "ok"})
+}
+
+type databaseBackupTaskRequest struct {
+	RetainCount   int    `json:"backup_schedule_retain_count"`
+	WebDAVEnabled bool   `json:"backup_webdav_enabled"`
+	WebDAVURL     string `json:"backup_webdav_url"`
+	WebDAVUser    string `json:"backup_webdav_username"`
+	WebDAVPass    string `json:"backup_webdav_password"`
+	WebDAVDir     string `json:"backup_webdav_remote_dir"`
+}
+
+func (req databaseBackupTaskRequest) applyTo(settings backupScheduleSettings) backupScheduleSettings {
+	if req.RetainCount > 0 {
+		settings.RetainCount = req.RetainCount
+	}
+	settings.WebDAV = webDAVBackupSettings{
+		Enabled:   req.WebDAVEnabled,
+		URL:       req.WebDAVURL,
+		Username:  req.WebDAVUser,
+		Password:  req.WebDAVPass,
+		RemoteDir: req.WebDAVDir,
+	}
+	return settings
+}
+
+func (req databaseBackupTaskRequest) webDAVSettings() webDAVBackupSettings {
+	return webDAVBackupSettings{
+		Enabled:   true,
+		URL:       req.WebDAVURL,
+		Username:  req.WebDAVUser,
+		Password:  req.WebDAVPass,
+		RemoteDir: req.WebDAVDir,
+	}
+}
+
+func bindDatabaseBackupTaskRequest(c *gin.Context, settings backupScheduleSettings) (backupScheduleSettings, bool) {
+	var req databaseBackupTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if errors.Is(err, io.EOF) {
+			return settings, true
+		}
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "备份参数格式错误"})
+		return settings, false
+	}
+	return req.applyTo(settings), true
+}
+
+func (s *appState) createManualDatabaseBackupTask(c *gin.Context) {
+	settings, err := s.readBackupScheduleSettings(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "读取备份设置失败"})
+		return
+	}
+	var ok bool
+	settings, ok = bindDatabaseBackupTaskRequest(c, settings)
+	if !ok {
+		return
+	}
+	task := s.tasks.create("database_backup", backupTaskTotal(settings), "手动备份任务已创建")
+	go s.runDatabaseBackupTask(task.ID, settings)
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: task, Msg: "ok"})
+}
+
+func (s *appState) testBackupWebDAV(c *gin.Context) {
+	var req databaseBackupTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "WebDAV 参数格式错误"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	if err := testWebDAVBackupStorage(ctx, req.webDAVSettings()); err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: gin.H{"message": "WebDAV 连接测试成功"}, Msg: "ok"})
+}
+
+func (s *appState) restoreDatabaseBackup(c *gin.Context) {
+	tool, err := postgresToolPath("pg_restore")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: err.Error()})
+		return
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "请选择要恢复的备份文件"})
+		return
+	}
+	if !strings.EqualFold(filepath.Ext(file.Filename), ".dump") {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "请上传系统生成的 .dump 备份文件"})
+		return
+	}
+
+	tempPath, err := saveUploadedDatabaseBackup(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "保存上传备份文件失败"})
+		return
+	}
+	defer os.Remove(tempPath)
+
+	dsn := databaseURL()
+	ctx, cancel := context.WithTimeout(c.Request.Context(), databaseRestoreTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(
+		ctx,
+		tool,
+		"--clean",
+		"--if-exists",
+		"--no-owner",
+		"--no-privileges",
+		"--single-transaction",
+		"--dbname", dsn,
+		tempPath,
+	)
+	cmd.Env = postgresToolEnv(tool)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: postgresCommandMessage("数据库恢复失败", dsn, output, err, ctx.Err())})
+		return
 	}
 
 	c.JSON(http.StatusOK, apiResponse{
 		Code: 0,
 		Data: gin.H{
-			"exported_at": time.Now().Format(time.RFC3339),
-			"settings":    settings,
-			"users":       users,
+			"message":           "数据库恢复完成，程序正在重启",
+			"restart_scheduled": true,
 		},
 		Msg: "ok",
 	})
+	scheduleRestoreRestart()
+}
+
+func scheduleRestoreRestart() {
+	go func() {
+		time.Sleep(restoreRestartDelay)
+		os.Exit(restoreRestartExitCode)
+	}()
+}
+
+func saveUploadedDatabaseBackup(fileHeader *multipart.FileHeader) (string, error) {
+	source, err := fileHeader.Open()
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
+
+	temp, err := os.CreateTemp("", "mailplus-db-restore-*.dump")
+	if err != nil {
+		return "", err
+	}
+	tempPath := temp.Name()
+	defer temp.Close()
+
+	if _, err := io.Copy(temp, source); err != nil {
+		_ = os.Remove(tempPath)
+		return "", err
+	}
+	return tempPath, nil
+}
+
+func collectDatabaseBackupFiles() ([]databaseBackupFileResponse, error) {
+	files := make([]databaseBackupFileResponse, 0)
+	seenDirs := map[string]bool{}
+	seenFiles := map[string]bool{}
+	for _, dir := range databaseBackupDirectories() {
+		cleanDir := normalizeBackupPath(dir)
+		dirKey := backupPathKey(cleanDir)
+		if seenDirs[dirKey] {
+			continue
+		}
+		seenDirs[dirKey] = true
+
+		entries, err := os.ReadDir(cleanDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !isDatabaseBackupFile(entry.Name()) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			filePath := normalizeBackupPath(filepath.Join(cleanDir, entry.Name()))
+			fileKey := backupPathKey(filePath)
+			if seenFiles[fileKey] {
+				continue
+			}
+			seenFiles[fileKey] = true
+			files = append(files, databaseBackupFileResponse{
+				Name:       entry.Name(),
+				Size:       info.Size(),
+				CreatedAt:  info.ModTime().Format(time.RFC3339),
+				ModifiedAt: info.ModTime().Format(time.RFC3339),
+				Directory:  filepath.Dir(filePath),
+			})
+		}
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModifiedAt > files[j].ModifiedAt
+	})
+	return files, nil
+}
+
+func resolveDatabaseBackupFile(rawName string) (string, string, bool) {
+	filename, err := url.PathUnescape(rawName)
+	if err != nil {
+		filename = rawName
+	}
+	filename = filepath.Base(filename)
+	if filename == "." || filename == string(filepath.Separator) || !isDatabaseBackupFile(filename) {
+		return "", "", false
+	}
+	seenDirs := map[string]bool{}
+	for _, dir := range databaseBackupDirectories() {
+		cleanDir := normalizeBackupPath(dir)
+		dirKey := backupPathKey(cleanDir)
+		if seenDirs[dirKey] {
+			continue
+		}
+		seenDirs[dirKey] = true
+		candidate := filepath.Join(cleanDir, filename)
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return normalizeBackupPath(candidate), filename, true
+		}
+	}
+	return "", "", false
+}
+
+func databaseBackupDirectories() []string {
+	dirs := []string{}
+	if configured := strings.TrimSpace(os.Getenv("BACKUP_DIR")); configured != "" {
+		dirs = append(dirs, configured)
+	}
+	dirs = append(dirs, backupStorageDir(), "backups", filepath.Join("..", "backups"))
+	if executable, err := os.Executable(); err == nil {
+		executableDir := filepath.Dir(executable)
+		dirs = append(dirs,
+			filepath.Join(executableDir, "backups"),
+			filepath.Join(executableDir, "..", "backups"),
+		)
+	}
+	return dirs
+}
+
+func normalizeBackupPath(value string) string {
+	cleanPath := filepath.Clean(value)
+	if absolutePath, err := filepath.Abs(cleanPath); err == nil {
+		cleanPath = absolutePath
+	}
+	if realPath, err := filepath.EvalSymlinks(cleanPath); err == nil {
+		cleanPath = realPath
+	}
+	return filepath.Clean(cleanPath)
+}
+
+func backupPathKey(value string) string {
+	key := normalizeBackupPath(value)
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	return key
+}
+
+func isDatabaseBackupFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".dump" || ext == ".backup" || ext == ".bak"
+}
+
+func isManagedDatabaseBackupFile(name string) bool {
+	return strings.HasPrefix(filepath.Base(name), "mailplus-db-backup-") && isDatabaseBackupFile(name)
+}
+
+func backupStorageDir() string {
+	if configured := strings.TrimSpace(os.Getenv("BACKUP_DIR")); configured != "" {
+		return filepath.Clean(configured)
+	}
+	if executable, err := os.Executable(); err == nil {
+		executableDir := filepath.Dir(executable)
+		tempDir := filepath.Clean(os.TempDir())
+		if tempDir == "" || !strings.HasPrefix(filepath.Clean(executableDir), tempDir) {
+			return filepath.Join(executableDir, "backups")
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Join(cwd, "backups")
+	}
+	return "backups"
+}
+
+type backupScheduler struct {
+	state      *appState
+	mu         sync.Mutex
+	lastRunKey string
+	running    bool
+}
+
+type backupScheduleSettings struct {
+	Enabled      bool
+	Frequency    string
+	Time         string
+	IntervalDays int
+	Weekday      int
+	MonthDay     int
+	RetainCount  int
+	WebDAV       webDAVBackupSettings
+}
+
+type webDAVBackupSettings struct {
+	Enabled   bool
+	URL       string
+	Username  string
+	Password  string
+	RemoteDir string
+}
+
+func newBackupScheduler(state *appState) *backupScheduler {
+	return &backupScheduler{state: state}
+}
+
+func (s *backupScheduler) run(stop <-chan struct{}) {
+	s.check(time.Now())
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			s.check(now)
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (s *backupScheduler) check(now time.Time) {
+	settings, err := s.state.readBackupScheduleSettings(context.Background())
+	if err != nil || !settings.Enabled {
+		return
+	}
+	runKey, due := backupScheduleRunKey(settings, now)
+	if !due || runKey == "" {
+		return
+	}
+
+	s.mu.Lock()
+	if s.running || s.lastRunKey == runKey {
+		s.mu.Unlock()
+		return
+	}
+	s.running = true
+	s.lastRunKey = runKey
+	s.mu.Unlock()
+
+	task := s.state.tasks.create("database_backup", backupTaskTotal(settings), "定时备份任务已创建")
+	go func(taskID string) {
+		defer func() {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+		}()
+		s.state.runDatabaseBackupTask(taskID, settings)
+	}(task.ID)
+}
+
+func (s *appState) readBackupScheduleSettings(ctx context.Context) (backupScheduleSettings, error) {
+	values, err := s.readSettings(ctx)
+	if err != nil {
+		return backupScheduleSettings{}, err
+	}
+	return backupScheduleSettings{
+		Enabled:      settingBool(values, "backup_schedule_enabled"),
+		Frequency:    settingString(values, "backup_schedule_frequency"),
+		Time:         settingString(values, "backup_schedule_time"),
+		IntervalDays: settingInt(values, "backup_schedule_interval_days"),
+		Weekday:      settingInt(values, "backup_schedule_weekday"),
+		MonthDay:     settingInt(values, "backup_schedule_month_day"),
+		RetainCount:  settingInt(values, "backup_schedule_retain_count"),
+		WebDAV: webDAVBackupSettings{
+			Enabled:   settingBool(values, "backup_webdav_enabled"),
+			URL:       settingString(values, "backup_webdav_url"),
+			Username:  settingString(values, "backup_webdav_username"),
+			Password:  settingString(values, "backup_webdav_password"),
+			RemoteDir: settingString(values, "backup_webdav_remote_dir"),
+		},
+	}, nil
+}
+
+func backupScheduleRunKey(settings backupScheduleSettings, now time.Time) (string, bool) {
+	hour, minute := parseScheduleClock(settings.Time)
+	if now.Hour() != hour || now.Minute() != minute {
+		return "", false
+	}
+	dateKey := now.Format("2006-01-02")
+	switch settings.Frequency {
+	case "interval_days":
+		interval := clampInt(settings.IntervalDays, 1, 365)
+		localMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		dayNumber := int(localMidnight.Unix() / int64(24*time.Hour/time.Second))
+		if dayNumber%interval != 0 {
+			return "", false
+		}
+		return fmt.Sprintf("interval:%d:%s:%02d:%02d", interval, dateKey, hour, minute), true
+	case "weekly":
+		weekday := clampInt(settings.Weekday, 1, 7)
+		if int(now.Weekday()+6)%7+1 != weekday {
+			return "", false
+		}
+		return fmt.Sprintf("weekly:%d:%s:%02d:%02d", weekday, dateKey, hour, minute), true
+	case "monthly":
+		day := clampInt(settings.MonthDay, 1, 31)
+		if now.Day() != day {
+			return "", false
+		}
+		return fmt.Sprintf("monthly:%d:%s:%02d:%02d", day, dateKey, hour, minute), true
+	default:
+		return fmt.Sprintf("daily:%s:%02d:%02d", dateKey, hour, minute), true
+	}
+}
+
+func parseScheduleClock(value string) (int, int) {
+	parts := strings.Split(value, ":")
+	hour, minute := 3, 0
+	if len(parts) > 0 {
+		if parsed, err := strconv.Atoi(parts[0]); err == nil {
+			hour = clampInt(parsed, 0, 23)
+		}
+	}
+	if len(parts) > 1 {
+		if parsed, err := strconv.Atoi(parts[1]); err == nil {
+			minute = clampInt(parsed, 0, 59)
+		}
+	}
+	return hour, minute
+}
+
+type databaseBackupRunResult struct {
+	LocalPath   string
+	Filename    string
+	WebDAVError error
+}
+
+func backupTaskTotal(settings backupScheduleSettings) int {
+	if settings.WebDAV.Enabled {
+		return 2
+	}
+	return 1
+}
+
+func (s *appState) runDatabaseBackupTask(taskID string, settings backupScheduleSettings) {
+	s.tasks.update(taskID, func(task *backgroundTask) {
+		task.Total = backupTaskTotal(settings)
+		task.Message = "正在生成本地备份"
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), databaseBackupTimeout)
+	defer cancel()
+	result, err := createScheduledDatabaseBackup(ctx, settings)
+	if err != nil {
+		s.tasks.fail(taskID, err)
+		fmt.Printf("database backup failed: %v\n", err)
+		return
+	}
+	if settings.WebDAV.Enabled {
+		if result.WebDAVError != nil {
+			message := fmt.Sprintf("本地备份已保存，WebDAV 上传失败: %v", result.WebDAVError)
+			s.tasks.update(taskID, func(task *backgroundTask) {
+				task.Total = 2
+				task.Done = 2
+				task.Success = 1
+				task.Failed = 1
+				task.Message = message
+			})
+			s.tasks.finish(taskID)
+			fmt.Printf("database backup webdav upload failed: %v\n", result.WebDAVError)
+			return
+		}
+		s.tasks.update(taskID, func(task *backgroundTask) {
+			task.Total = 2
+			task.Done = 2
+			task.Success = 2
+			task.Message = "本地备份和 WebDAV 上传已完成"
+		})
+		s.tasks.finish(taskID)
+		return
+	}
+	s.tasks.update(taskID, func(task *backgroundTask) {
+		task.Total = 1
+		task.Done = 1
+		task.Success = 1
+		task.Message = "本地备份已完成"
+	})
+	s.tasks.finish(taskID)
+}
+
+func createScheduledDatabaseBackup(ctx context.Context, settings backupScheduleSettings) (databaseBackupRunResult, error) {
+	outputDir := backupStorageDir()
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return databaseBackupRunResult{}, err
+	}
+	filename := fmt.Sprintf("mailplus-db-backup-%s.dump", time.Now().Format("20060102-150405"))
+	outputPath := filepath.Join(outputDir, filename)
+	if err := dumpDatabaseToFile(ctx, outputPath); err != nil {
+		_ = os.Remove(outputPath)
+		return databaseBackupRunResult{}, err
+	}
+	cleanupLocalDatabaseBackups(clampInt(settings.RetainCount, 1, 365))
+	result := databaseBackupRunResult{LocalPath: outputPath, Filename: filename}
+	if settings.WebDAV.Enabled {
+		if err := uploadBackupToWebDAV(ctx, settings.WebDAV, outputPath, filename); err != nil {
+			result.WebDAVError = err
+			return result, nil
+		}
+		if err := cleanupWebDAVDatabaseBackups(ctx, settings.WebDAV, clampInt(settings.RetainCount, 1, 365)); err != nil {
+			result.WebDAVError = err
+		}
+	}
+	return result, nil
+}
+
+func dumpDatabaseToFile(ctx context.Context, outputPath string) error {
+	tool, err := postgresToolPath("pg_dump")
+	if err != nil {
+		return err
+	}
+	dsn := databaseURL()
+	cmd := exec.CommandContext(
+		ctx,
+		tool,
+		"--format=custom",
+		"--clean",
+		"--if-exists",
+		"--no-owner",
+		"--no-privileges",
+		"--file", outputPath,
+		"--dbname", dsn,
+	)
+	cmd.Env = postgresToolEnv(tool)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.New(postgresCommandMessage("数据库备份失败", dsn, output, err, ctx.Err()))
+	}
+	return nil
+}
+
+func cleanupLocalDatabaseBackups(retainCount int) {
+	dir := backupStorageDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil || retainCount <= 0 {
+		return
+	}
+	files := make([]databaseBackupFileResponse, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !isDatabaseBackupFile(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, databaseBackupFileResponse{
+			Name:       entry.Name(),
+			Size:       info.Size(),
+			CreatedAt:  info.ModTime().Format(time.RFC3339),
+			ModifiedAt: info.ModTime().Format(time.RFC3339),
+			Directory:  dir,
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModifiedAt > files[j].ModifiedAt
+	})
+	for index, file := range files {
+		if index < retainCount {
+			continue
+		}
+		_ = os.Remove(filepath.Join(file.Directory, file.Name))
+	}
+}
+
+func uploadBackupToWebDAV(ctx context.Context, settings webDAVBackupSettings, localPath string, filename string) error {
+	baseURL := strings.TrimSpace(settings.URL)
+	if baseURL == "" {
+		return errors.New("WebDAV 地址为空")
+	}
+	file, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	targetURL, err := buildWebDAVFileURL(baseURL, settings.RemoteDir, filename)
+	if err != nil {
+		return err
+	}
+	if err := ensureWebDAVDirectory(ctx, baseURL, settings); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, targetURL, file)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = info.Size()
+	if settings.Username != "" || settings.Password != "" {
+		req.SetBasicAuth(settings.Username, settings.Password)
+	}
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		response.Body.Close()
+		return fmt.Errorf("WebDAV 上传失败: %s %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func testWebDAVBackupStorage(ctx context.Context, settings webDAVBackupSettings) error {
+	baseURL := strings.TrimSpace(settings.URL)
+	if baseURL == "" {
+		return errors.New("WebDAV 地址为空")
+	}
+	if err := ensureWebDAVDirectory(ctx, baseURL, settings); err != nil {
+		return err
+	}
+	filename := fmt.Sprintf(".mailplus-webdav-test-%s.tmp", time.Now().Format("20060102-150405"))
+	targetURL, err := buildWebDAVFileURL(baseURL, settings.RemoteDir, filename)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, targetURL, bytes.NewReader([]byte("mailplus webdav test")))
+	if err != nil {
+		return err
+	}
+	if settings.Username != "" || settings.Password != "" {
+		req.SetBasicAuth(settings.Username, settings.Password)
+	}
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		status := response.Status
+		response.Body.Close()
+		return fmt.Errorf("WebDAV 测试上传失败: %s %s", status, strings.TrimSpace(string(body)))
+	}
+	response.Body.Close()
+	if err := deleteWebDAVFile(ctx, settings, filename); err != nil {
+		return fmt.Errorf("WebDAV 测试文件删除失败: %w", err)
+	}
+	return nil
+}
+
+type webDAVBackupFileInfo struct {
+	Name       string
+	ModifiedAt time.Time
+}
+
+type webDAVMultiStatus struct {
+	Responses []webDAVResponse `xml:"response"`
+}
+
+type webDAVResponse struct {
+	Href     string           `xml:"href"`
+	Propstat []webDAVPropstat `xml:"propstat"`
+}
+
+type webDAVPropstat struct {
+	Prop webDAVProp `xml:"prop"`
+}
+
+type webDAVProp struct {
+	GetLastModified string `xml:"getlastmodified"`
+}
+
+func cleanupWebDAVDatabaseBackups(ctx context.Context, settings webDAVBackupSettings, retainCount int) error {
+	if retainCount <= 0 {
+		return nil
+	}
+	files, err := listWebDAVDatabaseBackups(ctx, settings)
+	if err != nil {
+		return err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].ModifiedAt.IsZero() && !files[j].ModifiedAt.IsZero() {
+			return files[i].ModifiedAt.After(files[j].ModifiedAt)
+		}
+		return files[i].Name > files[j].Name
+	})
+	for index, file := range files {
+		if index < retainCount {
+			continue
+		}
+		if err := deleteWebDAVFile(ctx, settings, file.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func listWebDAVDatabaseBackups(ctx context.Context, settings webDAVBackupSettings) ([]webDAVBackupFileInfo, error) {
+	baseURL := strings.TrimSpace(settings.URL)
+	if baseURL == "" {
+		return nil, errors.New("WebDAV 地址为空")
+	}
+	dirURL, err := buildWebDAVDirectoryURL(baseURL, settings.RemoteDir)
+	if err != nil {
+		return nil, err
+	}
+	propfindBody := `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><getlastmodified /></prop></propfind>`
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", dirURL, strings.NewReader(propfindBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Depth", "1")
+	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+	if settings.Username != "" || settings.Password != "" {
+		req.SetBasicAuth(settings.Username, settings.Password)
+	}
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		return nil, fmt.Errorf("WebDAV 读取备份列表失败: %s %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	var result webDAVMultiStatus
+	if err := xml.NewDecoder(io.LimitReader(response.Body, 2*1024*1024)).Decode(&result); err != nil {
+		return nil, err
+	}
+	files := make([]webDAVBackupFileInfo, 0)
+	for _, item := range result.Responses {
+		name := webDAVBackupNameFromHref(item.Href)
+		if !isManagedDatabaseBackupFile(name) {
+			continue
+		}
+		files = append(files, webDAVBackupFileInfo{
+			Name:       name,
+			ModifiedAt: webDAVResponseModifiedAt(item),
+		})
+	}
+	return files, nil
+}
+
+func webDAVResponseModifiedAt(response webDAVResponse) time.Time {
+	for _, propstat := range response.Propstat {
+		if value := strings.TrimSpace(propstat.Prop.GetLastModified); value != "" {
+			if parsed, err := http.ParseTime(value); err == nil {
+				return parsed
+			}
+		}
+	}
+	return time.Time{}
+}
+
+func webDAVBackupNameFromHref(href string) string {
+	parsed, err := url.Parse(strings.TrimSpace(href))
+	if err != nil {
+		return ""
+	}
+	value, err := url.PathUnescape(path.Base(parsed.Path))
+	if err != nil {
+		value = path.Base(parsed.Path)
+	}
+	return filepath.Base(value)
+}
+
+func deleteWebDAVFile(ctx context.Context, settings webDAVBackupSettings, filename string) error {
+	baseURL := strings.TrimSpace(settings.URL)
+	if baseURL == "" {
+		return errors.New("WebDAV 地址为空")
+	}
+	targetURL, err := buildWebDAVFileURL(baseURL, settings.RemoteDir, filename)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, targetURL, nil)
+	if err != nil {
+		return err
+	}
+	if settings.Username != "" || settings.Password != "" {
+		req.SetBasicAuth(settings.Username, settings.Password)
+	}
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound || (response.StatusCode >= 200 && response.StatusCode < 300) {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+	return fmt.Errorf("WebDAV 删除旧备份失败: %s %s", response.Status, strings.TrimSpace(string(body)))
+}
+
+func ensureWebDAVDirectory(ctx context.Context, baseURL string, settings webDAVBackupSettings) error {
+	remoteDir := strings.TrimSpace(settings.RemoteDir)
+	if remoteDir == "" || remoteDir == "/" {
+		return nil
+	}
+	dirURLs, err := buildWebDAVDirectoryURLs(baseURL, remoteDir)
+	if err != nil {
+		return err
+	}
+	for _, dirURL := range dirURLs {
+		req, err := http.NewRequestWithContext(ctx, "MKCOL", dirURL, nil)
+		if err != nil {
+			return err
+		}
+		if settings.Username != "" || settings.Password != "" {
+			req.SetBasicAuth(settings.Username, settings.Password)
+		}
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		if response.StatusCode == http.StatusCreated || response.StatusCode == http.StatusMethodNotAllowed || response.StatusCode == http.StatusOK {
+			response.Body.Close()
+			continue
+		}
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			response.Body.Close()
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		return fmt.Errorf("WebDAV 创建目录失败: %s %s", response.Status, strings.TrimSpace(string(body)))
+	}
+
+	return nil
+}
+
+func buildWebDAVFileURL(baseURL string, remoteDir string, filename string) (string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	joinedPath := parsed.Path
+	if joinedPath == "" {
+		joinedPath = "/"
+	}
+	cleanRemoteDir := strings.TrimSpace(remoteDir)
+	if cleanRemoteDir != "" && cleanRemoteDir != "/" {
+		joinedPath = path.Join(joinedPath, cleanRemoteDir)
+	}
+	joinedPath = path.Join(joinedPath, filename)
+	if !strings.HasPrefix(joinedPath, "/") {
+		joinedPath = "/" + joinedPath
+	}
+	parsed.Path = joinedPath
+	return parsed.String(), nil
+}
+
+func buildWebDAVDirectoryURL(baseURL string, remoteDir string) (string, error) {
+	dirURLs, err := buildWebDAVDirectoryURLs(baseURL, remoteDir)
+	if err != nil {
+		return "", err
+	}
+	if len(dirURLs) > 0 {
+		return dirURLs[len(dirURLs)-1], nil
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	return parsed.String(), nil
+}
+
+func buildWebDAVDirectoryURLs(baseURL string, remoteDir string) ([]string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	joinedPath := parsed.Path
+	if joinedPath == "" {
+		joinedPath = "/"
+	}
+	parts := strings.FieldsFunc(strings.TrimSpace(remoteDir), func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	urls := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		joinedPath = path.Join(joinedPath, part)
+		if !strings.HasPrefix(joinedPath, "/") {
+			joinedPath = "/" + joinedPath
+		}
+		next := *parsed
+		next.Path = joinedPath
+		urls = append(urls, next.String())
+	}
+	return urls, nil
+}
+
+func settingBool(values map[string]interface{}, key string) bool {
+	value, _ := values[key].(bool)
+	return value
+}
+
+func settingString(values map[string]interface{}, key string) string {
+	value, _ := values[key].(string)
+	return value
+}
+
+func settingInt(values map[string]interface{}, key string) int {
+	switch value := values[key].(type) {
+	case int:
+		return value
+	case float64:
+		return int(value)
+	case string:
+		parsed, _ := strconv.Atoi(value)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func clampInt(value int, min int, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func postgresToolPath(name string) (string, error) {
+	executable := name
+	if runtime.GOOS == "windows" {
+		executable += ".exe"
+	}
+
+	if binDir := strings.TrimSpace(os.Getenv("POSTGRES_BIN")); binDir != "" {
+		candidate := filepath.Join(binDir, executable)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+
+	if path, err := exec.LookPath(name); err == nil {
+		return path, nil
+	}
+	if executable != name {
+		if path, err := exec.LookPath(executable); err == nil {
+			return path, nil
+		}
+	}
+
+	if runtime.GOOS == "windows" {
+		matches, _ := filepath.Glob(filepath.Join(`C:\Program Files\PostgreSQL`, "*", "bin", executable))
+		sort.Strings(matches)
+		for i := len(matches) - 1; i >= 0; i-- {
+			if info, err := os.Stat(matches[i]); err == nil && !info.IsDir() {
+				return matches[i], nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("找不到 PostgreSQL 工具 %s，请安装 PostgreSQL 客户端，或设置 POSTGRES_BIN", name)
+}
+
+func postgresToolEnv(toolPath string) []string {
+	env := os.Environ()
+	binDir := strings.TrimSpace(os.Getenv("POSTGRES_BIN"))
+	if binDir == "" {
+		binDir = filepath.Dir(toolPath)
+	}
+	if binDir == "." || binDir == "" {
+		return env
+	}
+	nextPath := binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+	return upsertEnv(env, "PATH", nextPath)
+}
+
+func upsertEnv(env []string, key string, value string) []string {
+	prefix := strings.ToUpper(key) + "="
+	entry := key + "=" + value
+	for index, item := range env {
+		if strings.HasPrefix(strings.ToUpper(item), prefix) {
+			env[index] = entry
+			return env
+		}
+	}
+	return append(env, entry)
+}
+
+func postgresCommandMessage(prefix string, dsn string, output []byte, err error, ctxErr error) string {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return prefix + "：操作超时，请稍后重试"
+	}
+
+	detail := strings.TrimSpace(string(output))
+	if detail == "" && err != nil {
+		detail = err.Error()
+	}
+	detail = redactDatabaseURL(detail, dsn)
+	if len([]rune(detail)) > 1200 {
+		runes := []rune(detail)
+		detail = string(runes[len(runes)-1200:])
+	}
+	if detail == "" {
+		return prefix
+	}
+	return prefix + "：" + detail
+}
+
+func redactDatabaseURL(text string, dsn string) string {
+	if dsn == "" || text == "" {
+		return text
+	}
+	redacted := strings.ReplaceAll(text, dsn, "[DATABASE_URL]")
+	parsed, err := url.Parse(dsn)
+	if err != nil || parsed.User == nil {
+		return redacted
+	}
+	if password, ok := parsed.User.Password(); ok && password != "" {
+		redacted = strings.ReplaceAll(redacted, password, "******")
+	}
+	return redacted
 }
 
 func (s *appState) health(c *gin.Context) {
@@ -2938,90 +4094,6 @@ func (s *appState) runMailDataImportTask(taskID string, path string, password st
 		task.Message = message
 	})
 	s.tasks.finish(taskID)
-}
-
-func (s *appState) exportMailData(c *gin.Context) {
-	var req mailDataExportRequest
-	_ = c.ShouldBindJSON(&req)
-
-	db, err := sql.Open("postgres", databaseURL())
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "导出邮箱数据失败"})
-		return
-	}
-	defer db.Close()
-
-	groups, err := queryExportMailGroups(c.Request.Context(), db)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "导出分组失败"})
-		return
-	}
-	accounts, err := queryExportMailAccounts(c.Request.Context(), db, accountExportSelector{IDs: req.IDs, Filter: req.Filter})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "导出邮箱账号失败"})
-		return
-	}
-
-	c.JSON(http.StatusOK, apiResponse{
-		Code: 0,
-		Data: mailDataPayload{
-			ExportedAt: time.Now().Format(time.RFC3339),
-			Groups:     groups,
-			Accounts:   accounts,
-		},
-		Msg: "ok",
-	})
-}
-
-func (s *appState) importMailData(c *gin.Context) {
-	var payload mailDataPayload
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "JSON文件格式错误"})
-		return
-	}
-	if len(payload.Groups) == 0 && len(payload.Accounts) == 0 {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "JSON文件中没有可导入的数据"})
-		return
-	}
-
-	db, err := sql.Open("postgres", databaseURL())
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "导入邮箱数据失败"})
-		return
-	}
-	defer db.Close()
-
-	tx, err := db.BeginTx(c.Request.Context(), nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "导入邮箱数据失败"})
-		return
-	}
-	defer tx.Rollback()
-
-	groupIDMap, groupCount, err := importMailGroups(c.Request.Context(), tx, payload.Groups, nil)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
-		return
-	}
-	accountCount, err := importMailAccounts(c.Request.Context(), tx, payload.Accounts, groupIDMap, nil)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
-		return
-	}
-	if _, err := tx.ExecContext(c.Request.Context(), `SELECT setval(pg_get_serial_sequence('mail_groups', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM mail_groups), 2), 2), true)`); err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "导入分组失败"})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "导入邮箱数据失败"})
-		return
-	}
-
-	c.JSON(http.StatusOK, apiResponse{
-		Code: 0,
-		Data: mailDataImportResult{Groups: groupCount, Accounts: accountCount},
-		Msg:  "ok",
-	})
 }
 
 func (s *appState) createMailAccount(c *gin.Context) {
@@ -5544,23 +6616,24 @@ func defaultPublicLogoCandidates() []string {
 
 func defaultSystemSettings() map[string]interface{} {
 	return map[string]interface{}{
-		"site_name":                    "\u90ae\u7bb1\u7ba1\u7406\u7cfb\u7edf",
-		"site_logo":                    defaultPublicLogoDataURL(),
-		"site_subtitle":                "\u6279\u91cf\u8d26\u53f7\u4e0e\u4efb\u52a1\u7ba1\u7406\u5e73\u53f0",
-		"table_default_page_size":      20,
-		"table_page_size_options":      []interface{}{10, 20, 50, 100},
-		"backup_s3_endpoint":           "",
-		"backup_s3_region":             "auto",
-		"backup_s3_bucket":             "",
-		"backup_s3_prefix":             "backups/",
-		"backup_s3_access_key_id":      "",
-		"backup_s3_secret_access_key":  "",
-		"backup_s3_force_path_style":   true,
-		"backup_schedule_enabled":      false,
-		"backup_schedule_cron_expr":    "0 2 * * *",
-		"backup_schedule_retain_days":  30,
-		"backup_schedule_retain_count": 10,
-		"card_key_log_cleanup_days":    "",
+		"site_name":                     "\u90ae\u7bb1\u7ba1\u7406\u7cfb\u7edf",
+		"site_logo":                     defaultPublicLogoDataURL(),
+		"site_subtitle":                 "\u6279\u91cf\u8d26\u53f7\u4e0e\u4efb\u52a1\u7ba1\u7406\u5e73\u53f0",
+		"table_default_page_size":       20,
+		"table_page_size_options":       []interface{}{10, 20, 50, 100},
+		"card_key_log_cleanup_days":     "",
+		"backup_schedule_enabled":       false,
+		"backup_schedule_frequency":     "daily",
+		"backup_schedule_time":          "03:00",
+		"backup_schedule_interval_days": 1,
+		"backup_schedule_weekday":       1,
+		"backup_schedule_month_day":     1,
+		"backup_schedule_retain_count":  3,
+		"backup_webdav_enabled":         false,
+		"backup_webdav_url":             "",
+		"backup_webdav_username":        "",
+		"backup_webdav_password":        "",
+		"backup_webdav_remote_dir":      "/MailPlus",
 	}
 }
 
@@ -5668,6 +6741,17 @@ func normalizeSortOrder(value string) string {
 func queryBool(c *gin.Context, key string) bool {
 	value := strings.TrimSpace(c.Query(key))
 	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes") || strings.EqualFold(value, "on")
+}
+
+func (s *appState) listTasks(c *gin.Context) {
+	limit := parsePositiveInt(c.Query("limit"), 20)
+	limit = clampInt(limit, 1, 100)
+	tasks, err := s.tasks.list(limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "读取任务列表失败"})
+		return
+	}
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: tasks, Msg: "ok"})
 }
 
 func parseIDParam(c *gin.Context) (int, bool) {

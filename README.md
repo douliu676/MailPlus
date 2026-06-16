@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/badge/Docker%20Hub-douliu676%2Fmailplus-2496ed?style=flat-square&logo=docker&logoColor=white" alt="Docker Hub" />
     <img src="https://img.shields.io/badge/Multi--Arch-amd64%20%7C%20arm64%20%7C%20armv7-22c55e?style=flat-square" alt="Multi Arch" />
     <img src="https://img.shields.io/badge/Self--Hosted-Yes-111827?style=flat-square" alt="Self Hosted" />
-    <img src="https://img.shields.io/badge/Release-v1.0.0-f59e0b?style=flat-square" alt="Release" />
+    <img src="https://img.shields.io/badge/Release-v1.0.1-f59e0b?style=flat-square" alt="Release" />
   </p>
 
   <p>
@@ -81,7 +81,7 @@ admin / admin123
 
 | 服务 | 镜像 |
 | --- | --- |
-| MailPlus | `douliu676/mailplus:v1.0.0` |
+| MailPlus | `douliu676/mailplus:v1.0.1` |
 | PostgreSQL | `postgres:16-alpine` |
 
 MailPlus 已发布为多架构镜像，用户安装时 Docker 会根据设备类型自动选择：
@@ -91,6 +91,26 @@ linux/amd64
 linux/arm64
 linux/arm/v7
 ```
+
+## 🧾 版本说明
+
+### v1.0.0
+
+- 卡密取件：生成卡密、绑定邮箱、限制次数、关键词过滤、邮件天数过滤。
+- IMAP 邮箱管理：账号分组、批量导入、导出、测试连接、收件、发件和备注。
+- Outlook / Microsoft 邮箱管理：OAuth 授权、批量导入、收件、导出和测试连接。
+- 代理系统：支持 HTTP、SOCKS5、VMess、VLESS，并通过内置 xray 转换为本地代理。
+- 后台能力：卡密日志、用户管理、系统设置、个人资料、任务中心和 Docker 一键部署。
+- 部署能力：支持普通独立多开和共用 PostgreSQL 多开，镜像支持 `linux/amd64`、`linux/arm64`、`linux/arm/v7`。
+
+### v1.0.1
+
+- 数据库备份新增定时备份和手动备份，支持本地保存，也支持开启 WebDAV 后同步上传。
+- 备份保留份数默认改为 3 份，本地和 WebDAV 都会按保留份数清理。
+- 查看备份窗口支持显示文件名、文件大小、创建时间，并提供下载和删除操作。
+- 恢复备份完成后会自动重启程序，兼容开发模式、Docker 和 Windows 启动器。
+- WebDAV 测试连接和备份上传失败会进入任务中心显示，方便排查异常。
+- 代理切换会先测试节点，测试成功后再切换，并提示切换成功和延迟。
 
 ## 🧰 常用命令
 
@@ -311,7 +331,7 @@ sequenceDiagram
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64,linux/arm/v7 \
-  -t douliu676/mailplus:v1.0.0 \
+  -t douliu676/mailplus:v1.0.1 \
   -t douliu676/mailplus:latest \
   --push .
 ```
@@ -319,7 +339,7 @@ docker buildx build \
 检查镜像架构：
 
 ```bash
-docker buildx imagetools inspect douliu676/mailplus:v1.0.0
+docker buildx imagetools inspect douliu676/mailplus:v1.0.1
 docker buildx imagetools inspect douliu676/mailplus:latest
 ```
 

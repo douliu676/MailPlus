@@ -1,0 +1,123 @@
+# Docker Compose 服务定义。
+#
+# 多开必看（不依赖 .env）：
+# 第一套：
+#   name: mail
+#   app 容器名: mail
+#   postgres 容器名: mail-postgres
+#   数据库名: mail_admin
+# 第二套：
+#   name 改成 mail_1
+#   app 容器名改成 mail_1
+#   postgres 容器名改成 mail-postgres_1
+#   数据库名改成 mail_admin_1
+# 第三套：
+#   name 改成 mail_2
+#   app 容器名改成 mail_2
+#   postgres 容器名改成 mail-postgres_2
+#   数据库名改成 mail_admin_2
+# 端口也要每套不同，只改 ports 冒号左边的前端宿主机端口。
+
+# 【多开必改】Compose 项目名；第二套改成 mail_1，第三套改成 mail_2。
+name: mail
+
+services:
+  # app 服务：同一个容器里运行 Go 后端和构建后的前端静态服务。
+  app:
+    # 【多开必改】app 容器名；第二套改成 mail_1，第三套改成 mail_2。
+    container_name: mail
+    # 使用 Docker Hub 上已发布的 MailPlus 镜像；升级时改成新的版本号。
+    image: douliu676/mailplus:v1.0.1
+    # 容器异常退出或 Docker 重启后自动恢复，手动停止除外。
+    restart: unless-stopped
+    # 端口映射：冒号左边是宿主机端口，冒号右边是容器内部端口。
+    ports:
+      # 【多开必改】前端宿主机端口：第二套可改成 "4499:4399"，第三套可改成 "4599:4399"。
+      # 冒号右边的容器内部端口 4399 不用改。
+      - "4399:4399"
+      # 后端 4400 只在容器内部使用，不暴露到宿主机。
+    # 注入到 app 容器内部的环境变量。
+    environment:
+      # 后端监听地址，0.0.0.0 表示允许容器网络访问。
+      HOST: 0.0.0.0
+      # 后端容器内部监听端口，固定为 4400；多开时这里不用改。
+      PORT: 4400
+      # 前端静态服务监听地址，0.0.0.0 表示允许容器网络访问。
+      FRONTEND_HOST: 0.0.0.0
+      # 前端容器内部监听端口，固定为 4399；多开时这里不用改。
+      FRONTEND_PORT: 4399
+      # 前端容器内部代理后端的地址；这里走容器内部 4400，不是宿主机端口，多开时不用改。
+      BACKEND_URL: http://127.0.0.1:4400
+      # 【多开必改】后端连接 PostgreSQL 的地址；只改最后的数据库名，服务名 postgres 和 5432 不用改。
+      # 第二套改成 mail_admin_1，第三套改成 mail_admin_2。
+      DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin?sslmode=disable"
+      # Gin 使用 release 模式，减少调试输出。
+      GIN_MODE: release
+      # 定时备份文件保存目录；下面 volumes 会把它持久化到宿主机 ./backups。
+      BACKUP_DIR: /app/backups
+      # 容器时区；.env 里的 TZ 可覆盖，默认 Asia/Shanghai。
+      TZ: "${TZ:-Asia/Shanghai}"
+    # app 本地备份文件持久化。
+    volumes:
+      - ./backups:/app/backups
+    # app 启动前等待 postgres 健康检查通过。
+    depends_on:
+      # 依赖下方 postgres 数据库服务。
+      postgres:
+        # 数据库 healthy 后再启动 app。
+        condition: service_healthy
+    # app 加入自定义网络，方便通过服务名访问 postgres。
+    networks:
+      # 使用下面定义的 mail-network 网络。
+      - mail-network
+
+  # postgres 服务：应用自带的 PostgreSQL 数据库。
+  postgres:
+    # 【多开必改】PostgreSQL 容器名；第二套改成 mail-postgres_1，第三套改成 mail-postgres_2。
+    container_name: mail-postgres
+    # 使用官方 PostgreSQL 16 Alpine 镜像。
+    image: postgres:16-alpine
+    # 容器异常退出或 Docker 重启后自动恢复，手动停止除外。
+    restart: unless-stopped
+    # 注入到 postgres 容器内部的环境变量。
+    environment:
+      # 【多开必改】数据库名；第二套改成 mail_admin_1，第三套改成 mail_admin_2。
+      POSTGRES_DB: mail_admin
+      # 数据库用户名，固定为 postgres。
+      POSTGRES_USER: postgres
+      # 数据库密码；.env 里的 POSTGRES_PASSWORD 可覆盖，默认 postgres。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # 数据库容器时区；.env 里的 TZ 可覆盖，默认 Asia/Shanghai。
+      TZ: "${TZ:-Asia/Shanghai}"
+    # 数据卷挂载，用来持久化数据库数据。
+    volumes:
+      # 把命名卷 postgres_data 挂到 PostgreSQL 数据目录。
+      - postgres_data:/var/lib/postgresql/data
+    # 数据库健康检查，给 app 的 depends_on 使用。
+    healthcheck:
+      # 【多开必改】这里的数据库名要和上面的 POSTGRES_DB 保持一致。
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mail_admin"]
+      # 每 10 秒检查一次。
+      interval: 10s
+      # 单次检查超过 5 秒视为失败。
+      timeout: 5s
+      # 最多重试 10 次。
+      retries: 10
+      # 容器启动后先等待 10 秒再开始计算健康检查失败。
+      start_period: 10s
+    # postgres 加入自定义网络，供 app 通过服务名 postgres 访问。
+    networks:
+      # 使用下面定义的 mail-network 网络。
+      - mail-network
+
+# 命名卷定义。
+volumes:
+  # PostgreSQL 数据持久化卷；多开时会按上面的 name 自动隔离。
+  postgres_data:
+
+# 自定义网络定义。
+networks:
+  # app 和 postgres 共用的内部网络。
+  mail-network:
+    # 使用 Docker 默认 bridge 网络驱动。
+    driver: bridge

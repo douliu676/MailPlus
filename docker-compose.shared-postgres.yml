@@ -21,7 +21,7 @@ services:
   # 第一套 MailPlus，默认启用。
   app:
     container_name: mail
-    image: douliu676/mailplus:v1.0.0
+    image: douliu676/mailplus:v1.0.1
     restart: unless-stopped
     ports:
       # 第一套前端访问端口：http://服务器IP:4399
@@ -36,7 +36,10 @@ services:
       # 第一套数据库名：mail_admin。
       DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin?sslmode=disable"
       GIN_MODE: release
+      BACKUP_DIR: /app/backups
       TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - ./backups/mail:/app/backups
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -47,7 +50,7 @@ services:
   # 使用时删除这一整段前面的 #，并确认 container_name、ports、DATABASE_URL 数据库名都不重复。
   # app_1:
   #   container_name: mail_1
-  #   image: douliu676/mailplus:v1.0.0
+  #   image: douliu676/mailplus:v1.0.1
   #   restart: unless-stopped
   #   ports:
   #     # 第二套前端访问端口：http://服务器IP:4499
@@ -62,7 +65,10 @@ services:
   #     # 第二套数据库名：mail_admin_1。
   #     DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin_1?sslmode=disable"
   #     GIN_MODE: release
+  #     BACKUP_DIR: /app/backups
   #     TZ: "${TZ:-Asia/Shanghai}"
+  #   volumes:
+  #     - ./backups/mail_1:/app/backups
   #   depends_on:
   #     db-init:
   #       condition: service_completed_successfully
@@ -73,7 +79,7 @@ services:
   # 使用时删除这一整段前面的 #，并确认 container_name、ports、DATABASE_URL 数据库名都不重复。
   # app_2:
   #   container_name: mail_2
-  #   image: douliu676/mailplus:v1.0.0
+  #   image: douliu676/mailplus:v1.0.1
   #   restart: unless-stopped
   #   ports:
   #     # 第三套前端访问端口：http://服务器IP:4599
@@ -88,7 +94,10 @@ services:
   #     # 第三套数据库名：mail_admin_2。
   #     DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin_2?sslmode=disable"
   #     GIN_MODE: release
+  #     BACKUP_DIR: /app/backups
   #     TZ: "${TZ:-Asia/Shanghai}"
+  #   volumes:
+  #     - ./backups/mail_2:/app/backups
   #   depends_on:
   #     db-init:
   #       condition: service_completed_successfully
