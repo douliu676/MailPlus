@@ -107,7 +107,7 @@ services:
   # 共用的 PostgreSQL，只保留一个。
   postgres:
     container_name: mail-postgres
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       # PostgreSQL 首次初始化时会创建这个默认数据库。
@@ -116,7 +116,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d mail_admin"]
       interval: 10s
@@ -129,7 +129,7 @@ services:
   # 数据库初始化器：确保多开需要的数据库存在，执行完会自动退出。
   # 如果增加第四套 app_3，就在下面 for db 那一行末尾加 mail_admin_3。
   db-init:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     restart: "no"
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}

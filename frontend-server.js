@@ -56,8 +56,14 @@ function proxyRequest(req, res, rewritePath) {
   })
 
   upstream.on('error', (error) => {
-    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
-    res.end(`Bad Gateway: ${error.message}`)
+    const requestPath = req.url || ''
+    if (requestPath === '/api/health' || requestPath.startsWith('/api/health?')) {
+      res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ code: 503, msg: '后端正在重启', data: null }))
+      return
+    }
+    res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ code: 502, msg: `后端服务暂时不可用：${error.message}`, data: null }))
   })
 
   req.pipe(upstream)

@@ -25,6 +25,8 @@ import {
   type BackupScheduleFrequency,
   type SystemSettings,
 } from '../api/adminSettings'
+import { clearAuthSession } from '../api/session'
+import router from '../router'
 import { useAppStore } from '../stores/app'
 import { useTaskStore } from '../stores/tasks'
 
@@ -461,6 +463,9 @@ async function waitForBackendRestart(timeoutMs = 45000) {
       if (response.ok && (sawOffline || Date.now() >= minimumReadyAt)) {
         return true
       }
+      if (!response.ok) {
+        sawOffline = true
+      }
     } catch {
       sawOffline = true
     }
@@ -485,8 +490,9 @@ async function restoreDatabase() {
     if (result.restart_scheduled) {
       const restarted = await waitForBackendRestart()
       if (restarted) {
-        appStore.showSuccess('程序已重启完成')
-        await loadSettings({ showLoading: false })
+        clearAuthSession(false)
+        appStore.showSuccess('程序已重启完成，请重新登录')
+        await router.replace('/login')
       } else {
         appStore.showError('恢复已完成，但等待重启超时，请稍后刷新页面确认')
       }

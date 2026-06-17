@@ -31,7 +31,7 @@ RUN set -eux; \
 
 FROM ${NODE_IMAGE}
 WORKDIR /app
-RUN apk add --no-cache ca-certificates postgresql-client tzdata
+RUN apk add --no-cache ca-certificates postgresql18-client tzdata
 
 COPY --from=backend-builder /out/mail-backend /app/mail-backend
 COPY --from=frontend-builder /src/qianduan/dist /app/web

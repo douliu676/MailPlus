@@ -75,8 +75,8 @@ services:
   postgres:
     # 【多开必改】PostgreSQL 容器名；第二套改成 mail-postgres_1，第三套改成 mail-postgres_2。
     container_name: mail-postgres
-    # 使用官方 PostgreSQL 16 Alpine 镜像。
-    image: postgres:16-alpine
+    # 使用官方 PostgreSQL 18 Alpine 镜像。
+    image: postgres:18-alpine
     # 容器异常退出或 Docker 重启后自动恢复，手动停止除外。
     restart: unless-stopped
     # 注入到 postgres 容器内部的环境变量。
@@ -91,8 +91,8 @@ services:
       TZ: "${TZ:-Asia/Shanghai}"
     # 数据卷挂载，用来持久化数据库数据。
     volumes:
-      # 把命名卷 postgres_data 挂到 PostgreSQL 数据目录。
-      - postgres_data:/var/lib/postgresql/data
+      # 把命名卷 postgres_data 挂到 PostgreSQL 18 数据根目录。
+      - postgres_data:/var/lib/postgresql
     # 数据库健康检查，给 app 的 depends_on 使用。
     healthcheck:
       # 【多开必改】这里的数据库名要和上面的 POSTGRES_DB 保持一致。

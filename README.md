@@ -82,7 +82,7 @@ admin / admin123
 | 服务 | 镜像 |
 | --- | --- |
 | MailPlus | `douliu676/mailplus:v1.0.1` |
-| PostgreSQL | `postgres:16-alpine` |
+| PostgreSQL | `postgres:18-alpine` |
 
 MailPlus 已发布为多架构镜像，用户安装时 Docker 会根据设备类型自动选择：
 
@@ -266,7 +266,7 @@ docker compose up -d
 | 🧠 请求状态 | TanStack Vue Query |
 | 🧩 图标 | lucide-vue-next |
 | ⚙️ 后端 | Go 1.26、Gin、Ent |
-| 🗄️ 数据库 | PostgreSQL 16 |
+| 🗄️ 数据库 | PostgreSQL 18 |
 | 🔐 认证 | bcrypt、服务端会话 |
 | 🌐 代理 | xray core |
 | 🐳 容器 | Docker、Docker Compose、Buildx |
@@ -432,7 +432,7 @@ linux/arm/v7
 
 ### 可以用 postgres:latest 吗？
 
-不建议。数据库大版本升级可能导致已有数据卷无法直接启动。默认使用 `postgres:16-alpine` 更稳。
+不建议。数据库大版本升级可能导致已有数据卷无法直接启动。默认使用 `postgres:18-alpine`，并且数据卷挂载在 `/var/lib/postgresql`。
 
 ### 如何升级 MailPlus？
 
