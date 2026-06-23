@@ -9,6 +9,7 @@ import { getAdminSettings } from '../api/adminSettings'
 import { batchCreateOutlookAccounts, batchOutlookAction, createOutlookAccount, createOutlookDataExportTask, createOutlookDataImportTask, createOutlookGroup, deleteOutlookAccount, deleteOutlookGroup, exchangeOutlookCode, getOutlookAuthorizeURL, getOutlookMessageDetail, getOutlookOAuthResult, listOutlookAccounts, listOutlookGroups, listOutlookMessages, testOutlookAccount, updateOutlookAccount, updateOutlookGroup, type AccountListFilter, type BackgroundTask, type OutlookAccount, type OutlookAccountListResponse, type OutlookGroup, type OutlookMessage } from '../api/outlookAccounts'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { normalizeOutlookAccountPageCache, outlookAccountPageCacheKey, outlookManagementCacheKey, rememberOutlookAccountPage, type OutlookAccountPageCacheEntry } from '../utils/outlookManagementCache'
+import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
 const appStore = useAppStore()
 const taskStore = useTaskStore()
@@ -373,6 +374,7 @@ const messageFolderName = computed(() => {
   return '收件箱'
 })
 const selectedMessageBody = computed(() => linkifyText(selectedMessage.value?.body || selectedMessage.value?.body_preview || '暂无正文'))
+const selectedMessageSafeHtml = computed(() => sanitizeMailHtml(selectedMessage.value?.html || ''))
 
 watch(filteredAccounts, () => {
   const valid = new Set(filteredAccounts.value.map((item) => item.id))
@@ -2210,7 +2212,7 @@ function closeFloating(event?: MouseEvent) {
                 </div>
               </div>
               <div v-if="readDetailLoading" class="mt-5 text-sm text-gray-400 dark:text-dark-400">读取中...</div>
-              <div v-else-if="selectedMessage.html" class="outlook-detail-content" v-html="selectedMessage.html"></div>
+              <div v-else-if="selectedMessage.html" class="outlook-detail-content" v-html="selectedMessageSafeHtml"></div>
               <div v-else class="outlook-detail-content outlook-detail-plain" v-html="selectedMessageBody"></div>
             </section>
           </div>

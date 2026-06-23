@@ -33,12 +33,12 @@ async function handleLogin() {
   isLoading.value = true
 
   try {
-    await login({
+    const session = await login({
       account: formData.account,
       password: formData.password,
     })
     appStore.showSuccess('\u767b\u5f55\u6210\u529f\uff01\u6b22\u8fce\u56de\u6765\u3002')
-    await router.replace('/admin/dashboard')
+    await router.replace(session.must_change_password ? '/force-change-password' : '/admin/dashboard')
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '\u767b\u5f55\u5931\u8d25')
   } finally {

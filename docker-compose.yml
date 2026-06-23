@@ -50,7 +50,7 @@ services:
       BACKEND_URL: http://127.0.0.1:4400
       # 【多开必改】后端连接 PostgreSQL 的地址；只改最后的数据库名，服务名 postgres 和 5432 不用改。
       # 第二套改成 mail_admin_1，第三套改成 mail_admin_2。
-      DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/mail_admin?sslmode=disable"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-mail_admin}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-mail_admin}?sslmode=disable"
       # Gin 使用 release 模式，减少调试输出。
       GIN_MODE: release
       # 定时备份文件保存目录；下面 volumes 会把它持久化到宿主机 ./backups。
@@ -82,11 +82,11 @@ services:
     # 注入到 postgres 容器内部的环境变量。
     environment:
       # 【多开必改】数据库名；第二套改成 mail_admin_1，第三套改成 mail_admin_2。
-      POSTGRES_DB: mail_admin
+      POSTGRES_DB: ${POSTGRES_DB:-mail_admin}
       # 数据库用户名，固定为 postgres。
-      POSTGRES_USER: postgres
-      # 数据库密码；.env 里的 POSTGRES_PASSWORD 可覆盖，默认 postgres。
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-mail_admin}
+      # 数据库密码；必须在 .env 里设置强密码，不再提供默认弱口令。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       # 数据库容器时区；.env 里的 TZ 可覆盖，默认 Asia/Shanghai。
       TZ: "${TZ:-Asia/Shanghai}"
     # 数据卷挂载，用来持久化数据库数据。
@@ -96,7 +96,7 @@ services:
     # 数据库健康检查，给 app 的 depends_on 使用。
     healthcheck:
       # 【多开必改】这里的数据库名要和上面的 POSTGRES_DB 保持一致。
-      test: ["CMD-SHELL", "pg_isready -U postgres -d mail_admin"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       # 每 10 秒检查一次。
       interval: 10s
       # 单次检查超过 5 秒视为失败。

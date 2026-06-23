@@ -10,6 +10,18 @@ RESTORE_RESTART_EXIT_CODE="${RESTORE_RESTART_EXIT_CODE:-42}"
 BACKEND_RESTART_DELAY="${BACKEND_RESTART_DELAY:-2}"
 BACKEND_RESTART_ATTEMPTS="${BACKEND_RESTART_ATTEMPTS:-20}"
 
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "DATABASE_URL is required. Set POSTGRES_PASSWORD in .env and use docker compose." >&2
+  exit 1
+fi
+
+case "$DATABASE_URL" in
+  *"postgres://postgres:postgres@"*|*"postgresql://postgres:postgres@"*|*"CHANGE_ME"*)
+    echo "DATABASE_URL uses an unsafe default database password. Set a strong POSTGRES_PASSWORD in .env." >&2
+    exit 1
+    ;;
+esac
+
 start_backend() {
   /app/mail-backend &
   BACKEND_PID="$!"

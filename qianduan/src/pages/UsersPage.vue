@@ -17,7 +17,6 @@ import {
 import PaginationBar from '../components/PaginationBar.vue'
 import { useAppStore } from '../stores/app'
 import {
-  createUser,
   deleteUser,
   listUserBalanceRecords,
   listUsers,
@@ -119,7 +118,7 @@ const sortState = reactive<{ key: SortKey; order: SortOrder }>({
   order: 'desc',
 })
 
-const modalTitle = computed(() => (editingUser.value ? '编辑用户' : '创建用户'))
+const modalTitle = computed(() => '编辑用户')
 const totalPages = computed(() => Math.max(pagination.pages, 1))
 const normalizedPageSizeOptions = computed(() => {
   return Array.from(new Set(pageSizeOptions.value))
@@ -317,15 +316,6 @@ function setSort(key: SortKey) {
   loadUsers()
 }
 
-function resetForm() {
-  form.username = ''
-  form.email = ''
-  form.password = ''
-  form.balance = 0
-  form.role = 'user'
-  form.enabled = true
-}
-
 function generatePassword() {
   const uppercase = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
   const lowercase = 'abcdefghjkmnpqrstuvwxyz'
@@ -361,12 +351,6 @@ function shufflePassword(chars: string[]) {
   return chars
 }
 
-function openCreateModal() {
-  editingUser.value = null
-  resetForm()
-  showUserModal.value = true
-}
-
 function openEditModal(user: AdminUser) {
   editingUser.value = user
   form.username = user.username
@@ -380,17 +364,13 @@ function openEditModal(user: AdminUser) {
 }
 
 async function saveUser() {
+  if (!editingUser.value) return
   try {
-    if (editingUser.value) {
-      const updated = await updateUser(editingUser.value.id, form)
-      if (updated.id === readStoredUserID()) {
-        syncStoredUser(updated)
-      }
-      appStore.showSuccess('用户已更新')
-    } else {
-      await createUser(form)
-      appStore.showSuccess('用户已创建')
+    const updated = await updateUser(editingUser.value.id, form)
+    if (updated.id === readStoredUserID()) {
+      syncStoredUser(updated)
     }
+    appStore.showSuccess('用户已更新')
     showUserModal.value = false
     await refreshUserListAfterMutation()
   } catch (error) {
@@ -585,10 +565,6 @@ onBeforeUnmount(() => {
             <RefreshCw class="h-5 w-5" :class="{ 'animate-spin': loading }" />
           </button>
 
-          <button class="btn btn-primary h-9" type="button" @click="openCreateModal">
-            <Plus class="h-5 w-5" />
-            创建用户
-          </button>
         </div>
       </div>
 
@@ -734,7 +710,7 @@ onBeforeUnmount(() => {
             <label class="block">
               <span class="input-label">密码</span>
               <div class="flex gap-2">
-                <input v-model="form.password" class="input" type="text" :placeholder="editingUser ? '留空则不修改' : ''" />
+                <input v-model="form.password" class="input" type="text" placeholder="留空则不修改" />
                 <button class="btn btn-secondary shrink-0 px-3" type="button" title="随机生成密码" @click="generatePassword">
                   <RefreshCw class="h-5 w-5" />
                 </button>
@@ -749,7 +725,7 @@ onBeforeUnmount(() => {
             <button class="btn btn-secondary" type="button" @click="showUserModal = false">取消</button>
             <button class="btn btn-primary" type="button" @click="saveUser">
               <Check class="h-5 w-5" />
-              {{ editingUser ? '保存' : '创建' }}
+              保存
             </button>
           </div>
         </div>

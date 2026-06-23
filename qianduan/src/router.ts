@@ -1,5 +1,5 @@
 ﻿import { createRouter, createWebHistory } from 'vue-router'
-import { getAuthToken } from './api/session'
+import { getAuthToken, getSessionItem } from './api/session'
 
 const Login = () => import('./login.vue')
 const AdminLayout = () => import('./layout/AdminLayout.vue')
@@ -15,6 +15,7 @@ const PublicMailPage = () => import('./pages/PublicMailPage.vue')
 const QuickMailPage = () => import('./pages/QuickMailPage.vue')
 const SettingsPage = () => import('./pages/SettingsPage.vue')
 const ProfilePage = () => import('./pages/ProfilePage.vue')
+const ForceChangePasswordPage = () => import('./pages/ForceChangePasswordPage.vue')
 const NotFoundPage = () => import('./pages/NotFoundPage.vue')
 
 const router = createRouter({
@@ -29,6 +30,7 @@ const router = createRouter({
     { path: '/mail/keys=:cardKey/all/:email?', component: PublicMailPage, meta: { public: true, title: 'API取件', autoFetch: true } },
     { path: '/mail/keys=:cardKey', component: PublicMailPage, meta: { public: true, title: 'API取件' } },
     { path: '/login', component: Login, meta: { public: true, title: 'Login' } },
+    { path: '/force-change-password', component: ForceChangePasswordPage, meta: { title: '修改初始密码' } },
     {
       path: '/admin',
       component: AdminLayout,
@@ -51,13 +53,22 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   const token = getAuthToken()
+  const mustChangePassword = getSessionItem('must_change_password') === 'true'
 
   if (!to.meta.public && !token) {
     return '/login'
   }
 
-  if (to.path === '/login' && token) {
+  if (token && mustChangePassword && to.path !== '/force-change-password') {
+    return '/force-change-password'
+  }
+
+  if (token && !mustChangePassword && to.path === '/force-change-password') {
     return '/admin/dashboard'
+  }
+
+  if (to.path === '/login' && token) {
+    return mustChangePassword ? '/force-change-password' : '/admin/dashboard'
   }
 
   if (to.path === '/login' && Object.keys(to.query).length > 0) {

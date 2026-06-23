@@ -22,3 +22,29 @@ func TestPostgresAdminDSNSkipsSystemDatabase(t *testing.T) {
 		t.Fatal("postgresAdminDSN should skip postgres database")
 	}
 }
+
+func TestUnsafeDefaultDatabaseURL(t *testing.T) {
+	cases := []string{
+		"postgres://postgres:postgres@127.0.0.1:5432/mail_admin?sslmode=disable",
+		"postgres://postgres@127.0.0.1:5432/mail_admin?sslmode=disable",
+		"postgresql://postgres:@127.0.0.1:5432/mail_admin?sslmode=disable",
+		"postgres://mail_admin:CHANGE_ME_STRONG_PASSWORD@127.0.0.1:5432/mail_admin?sslmode=disable",
+	}
+	for _, dsn := range cases {
+		if !isUnsafeDefaultDatabaseURL(dsn) {
+			t.Fatalf("isUnsafeDefaultDatabaseURL(%q) = false, want true", dsn)
+		}
+	}
+}
+
+func TestStrongDatabaseURLIsAllowed(t *testing.T) {
+	cases := []string{
+		"postgres://mail_admin:strong-password@127.0.0.1:5432/mail_admin?sslmode=disable",
+		"postgres://postgres:strong-password@127.0.0.1:5432/mail_admin?sslmode=disable",
+	}
+	for _, dsn := range cases {
+		if isUnsafeDefaultDatabaseURL(dsn) {
+			t.Fatalf("isUnsafeDefaultDatabaseURL(%q) = true, want false", dsn)
+		}
+	}
+}

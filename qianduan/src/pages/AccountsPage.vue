@@ -10,6 +10,7 @@ import { createMailGroup, deleteMailGroup, listMailGroups, updateMailGroup, type
 import { batchCreateMailAccounts, batchMailAction, createMailAccount, createMailDataExportTask, createMailDataImportTask, createMailServer, deleteMailAccount, deleteMailServer, listMailAccounts, listMailServers, receiveMailDetail, receiveMailMessages, sendMailAccountMessage, testMailAccount, updateMailAccount, updateMailServer, type AccountListFilter, type BackgroundTask, type MailAccount, type MailAccountListResponse, type MailServer, type ReceivedMailDetail, type ReceivedMailMessage, type SaveMailAccountPayload } from '../api/mailAccounts'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { mailAccountPageCacheKey, mailManagementCacheKey, normalizeMailAccountPageCache, rememberMailAccountPage, type MailAccountPageCacheEntry } from '../utils/mailManagementCache'
+import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
 const appStore = useAppStore()
 const taskStore = useTaskStore()
@@ -434,6 +435,7 @@ const receiveVisibleMessages = computed(() => {
 const receivePageStart = computed(() => (receiveTotal.value === 0 ? 0 : (receivePage.value - 1) * receivePageSize.value + 1))
 const receivePageEnd = computed(() => Math.min(receiveTotal.value, receivePage.value * receivePageSize.value))
 const selectedReceivePlainHtml = computed(() => linkifyText(selectedReceiveMessage.value?.body || '暂无正文'))
+const selectedReceiveSafeHtml = computed(() => sanitizeMailHtml(selectedReceiveMessage.value?.html || ''))
 
 watch(groupNameScrollMax, (max) => {
   if (groupNameScrollX.value > max) {
@@ -2507,7 +2509,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div v-if="receiveDetailLoading" class="mt-5 text-sm text-gray-400 dark:text-dark-400">读取中...</div>
-              <div v-else-if="selectedReceiveMessage.html" class="mail-detail-content" v-html="selectedReceiveMessage.html"></div>
+              <div v-else-if="selectedReceiveMessage.html" class="mail-detail-content" v-html="selectedReceiveSafeHtml"></div>
               <div v-else class="mail-detail-content mail-detail-plain" v-html="selectedReceivePlainHtml"></div>
             </section>
           </div>

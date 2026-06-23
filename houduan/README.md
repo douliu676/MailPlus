@@ -10,13 +10,17 @@
 admin / admin123
 ```
 
+首次登录会强制修改初始密码。
+
 ## 启动方式
 
-请先确认 PostgreSQL 已启动，并创建好对应数据库。默认数据库连接为：
+请先确认 PostgreSQL 已启动，并创建好对应数据库。数据库连接示例：
 
 ```text
-postgres://postgres:postgres@localhost:5432/mail_admin?sslmode=disable
+postgres://mail_admin:CHANGE_ME_STRONG_PASSWORD@localhost:5432/mail_admin?sslmode=disable
 ```
+
+`CHANGE_ME_STRONG_PASSWORD` 必须替换为真实强密码，不能使用 `postgres/postgres` 或空密码。
 
 开发时建议复制一份 `.env`：
 
@@ -28,7 +32,7 @@ go run .
 后端启动时会自动读取当前目录的 `.env`。也可以通过环境变量 `DATABASE_URL` 指定其他数据库地址：
 
 ```powershell
-$env:DATABASE_URL="postgres://postgres:postgres@localhost:5432/mail_admin?sslmode=disable"
+$env:DATABASE_URL="postgres://mail_admin:CHANGE_ME_STRONG_PASSWORD@localhost:5432/mail_admin?sslmode=disable"
 go run .
 ```
 

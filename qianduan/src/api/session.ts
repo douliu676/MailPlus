@@ -6,20 +6,26 @@ export function setSessionItem(key: string, value: string) {
   sessionStorage.setItem(key, value)
 }
 
-const authStorageKeys = ['auth_token', 'refresh_token', 'auth_user', 'token_expires_at']
+const authStorageKeys = ['auth_token', 'refresh_token', 'auth_user', 'token_expires_at', 'must_change_password']
 export const authSessionClearedEvent = 'auth-session-cleared'
 export const authSessionClearedStorageKey = 'auth_session_cleared_at'
 
+function clearLegacyLocalAuthStorage() {
+  authStorageKeys.forEach((key) => {
+    localStorage.removeItem(key)
+  })
+}
+
 export function setAuthSessionItem(key: string, value: string) {
+  clearLegacyLocalAuthStorage()
   sessionStorage.setItem(key, value)
-  localStorage.setItem(key, value)
 }
 
 export function clearAuthSession(broadcast = true) {
   authStorageKeys.forEach((key) => {
     sessionStorage.removeItem(key)
-    localStorage.removeItem(key)
   })
+  clearLegacyLocalAuthStorage()
 
   if (broadcast) {
     const value = String(Date.now())
@@ -29,23 +35,13 @@ export function clearAuthSession(broadcast = true) {
 }
 
 export function getAuthToken() {
-  const expiresAt = Number(sessionStorage.getItem('token_expires_at') || localStorage.getItem('token_expires_at') || 0)
+  clearLegacyLocalAuthStorage()
+  const expiresAt = Number(sessionStorage.getItem('token_expires_at') || 0)
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     clearAuthSession()
     return ''
   }
-  const token = sessionStorage.getItem('auth_token') || localStorage.getItem('auth_token') || ''
-  const refreshToken = sessionStorage.getItem('refresh_token') || localStorage.getItem('refresh_token') || ''
-  const user = sessionStorage.getItem('auth_user') || localStorage.getItem('auth_user') || ''
-
-  if (token) {
-    setAuthSessionItem('auth_token', token)
-    if (refreshToken) setAuthSessionItem('refresh_token', refreshToken)
-    if (user) setAuthSessionItem('auth_user', user)
-    setAuthSessionItem('token_expires_at', String(expiresAt))
-  }
-
-  return token
+  return sessionStorage.getItem('auth_token') || ''
 }
 
 export function installAuthFetchInterceptor() {

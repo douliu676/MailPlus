@@ -10,6 +10,7 @@ export type LoginResponse = {
   refresh_token: string
   expires_in: number
   token_type: string
+  must_change_password: boolean
   user: {
     id: number
     username: string
@@ -42,6 +43,7 @@ export async function login(credentials: LoginRequest): Promise<LoginResponse> {
   setAuthSessionItem('refresh_token', result.data.refresh_token)
   setAuthSessionItem('auth_user', JSON.stringify(result.data.user))
   setAuthSessionItem('token_expires_at', String(Date.now() + result.data.expires_in * 1000))
+  setAuthSessionItem('must_change_password', result.data.must_change_password ? 'true' : 'false')
 
   return result.data
 }

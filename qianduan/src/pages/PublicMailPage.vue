@@ -6,6 +6,7 @@ import AppLogo from '../components/AppLogo.vue'
 import { getPublicMailInfo, getPublicMailMessages, getPublicMailPlain, PublicMailApiError, type PublicMailInfo, type PublicMailMessage } from '../api/publicMail'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
+import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -46,9 +47,8 @@ const mailBodyText = computed(() => {
   return currentMessage.value.body || currentMessage.value.body_preview || ''
 })
 const mailHtmlSrcdoc = computed(() => {
-  const html = currentMessage.value?.html?.trim()
+  const html = sanitizeMailHtml(currentMessage.value?.html || '').trim()
   if (!html) return ''
-  if (/<html[\s>]/i.test(html)) return html
   return `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>body{margin:0;background:#fff;color:#111827;font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;word-break:break-word}img{max-width:100%;height:auto}a{color:#0f766e}</style></head><body>${html}</body></html>`
 })
 const emptyMessage = computed(() => {

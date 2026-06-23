@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
   <img src="qianduan/public/logo.png" width="96" alt="MailPlus 管理系统 Logo" />
   <h1>MailPlus 管理系统</h1>
   <p><strong>IMAP / Outlook 邮箱管理 · 卡密取件 · 代理系统 · 自托管后台</strong></p>
@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/Vite-7.1-646cff?style=for-the-badge&logo=vite&logoColor=white" alt="Vite" />
     <img src="https://img.shields.io/badge/TypeScript-5.9-3178c6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
     <img src="https://img.shields.io/badge/Go-1.26-00add8?style=for-the-badge&logo=go&logoColor=white" alt="Go" />
-    <img src="https://img.shields.io/badge/PostgreSQL-16-4169e1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+    <img src="https://img.shields.io/badge/PostgreSQL-18-4169e1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
   </p>
 
   <p>
@@ -48,8 +48,11 @@ mkdir -p MailPlus
 cd MailPlus
 
 curl -L -o docker-compose.yml https://raw.githubusercontent.com/douliu676/MailPlus/main/docker-compose.yml
+curl -L -o .env.example https://raw.githubusercontent.com/douliu676/MailPlus/main/.env.example
+curl -L -o start-docker.sh https://raw.githubusercontent.com/douliu676/MailPlus/main/start-docker.sh
 
-docker compose up -d
+chmod +x start-docker.sh
+./start-docker.sh
 ```
 
 如果服务器没有 `curl`，可以用 `wget`：
@@ -59,7 +62,27 @@ mkdir -p MailPlus
 cd MailPlus
 
 wget -O docker-compose.yml https://raw.githubusercontent.com/douliu676/MailPlus/main/docker-compose.yml
+wget -O .env.example https://raw.githubusercontent.com/douliu676/MailPlus/main/.env.example
+wget -O start-docker.sh https://raw.githubusercontent.com/douliu676/MailPlus/main/start-docker.sh
 
+chmod +x start-docker.sh
+./start-docker.sh
+```
+
+`start-docker.sh` 会自动创建 `.env`。如果数据库密码为空或仍是 `CHANGE_ME_STRONG_PASSWORD`，脚本会自动生成随机强密码并写入 `.env`。
+
+如果你要自定义数据库密码，先编辑 `.env`：
+
+```env
+POSTGRES_DB=mail_admin
+POSTGRES_USER=mail_admin
+POSTGRES_PASSWORD=你的强密码
+TZ=Asia/Shanghai
+```
+
+然后可以直接运行：
+
+```bash
 docker compose up -d
 ```
 
@@ -75,7 +98,7 @@ http://服务器IP:4399
 admin / admin123
 ```
 
-> ⚠️ 首次部署后请立即修改默认密码。
+> ⚠️ 首次登录会强制修改初始密码。
 
 ## 📦 默认镜像
 
@@ -116,7 +139,8 @@ linux/arm/v7
 
 | 操作 | 命令 |
 | --- | --- |
-| 启动 | `docker compose up -d` |
+| 启动 | `./start-docker.sh` |
+| 重新构建并启动 | `./start-docker.sh --build` |
 | 查看容器 | `docker compose ps` |
 | 查看日志 | `docker compose logs -f` |
 | 重启 | `docker compose restart` |
@@ -171,6 +195,8 @@ curl -L -o docker-compose.shared-postgres.yml https://raw.githubusercontent.com/
 docker compose -f docker-compose.shared-postgres.yml up -d
 ```
 
+共用 PostgreSQL 多开也需要 `.env` 里的 `POSTGRES_PASSWORD`。如果没有 `.env`，可以先从 `.env.example` 复制一份并填写强密码。
+
 默认仍然是单开，只启用：
 
 ```text
@@ -201,17 +227,28 @@ postgres_data
 
 单开默认数据库名是 `mail_admin`。
 
-### 备份单个数据库
+### 推荐方式
+
+推荐在后台页面使用：
+
+- **完整备份**：生成 `.dump` 文件，包含当前数据库结构、数据和序列。
+- **完整恢复**：清理当前数据库对象，再导入备份文件。
+
+Docker 版和 Windows 版的完整备份文件可以互相恢复。PostgreSQL 的用户名和密码可以不同，只要目标程序当前配置的数据库账号有权限清理和导入对象即可。
+
+### 命令行备份单个数据库
+
+如果需要手动使用命令行备份，默认账号和数据库名都是 `mail_admin`：
 
 ```bash
 mkdir -p backup
-docker exec mail-postgres pg_dump -U postgres -d mail_admin > backup/mail_admin_$(date +%Y%m%d_%H%M%S).sql
+docker exec mail-postgres pg_dump -U mail_admin -d mail_admin -Fc > backup/mail_admin_$(date +%Y%m%d_%H%M%S).dump
 ```
 
-### 恢复单个数据库
+### 命令行恢复单个数据库
 
 ```bash
-cat backup/mail_admin_20260615_234500.sql | docker exec -i mail-postgres psql -U postgres -d mail_admin
+cat backup/mail_admin_20260615_234500.dump | docker exec -i mail-postgres pg_restore -U mail_admin -d mail_admin --clean --if-exists
 ```
 
 其中 `20260615_234500` 换成你真实备份文件名里的时间。
@@ -225,27 +262,25 @@ ls backup
 恢复最新一个 `mail_admin` 备份：
 
 ```bash
-cat $(ls -t backup/mail_admin_*.sql | head -n 1) | docker exec -i mail-postgres psql -U postgres -d mail_admin
-```
-
-### 完整备份 PostgreSQL
-
-```bash
-mkdir -p backup
-docker exec mail-postgres pg_dumpall -U postgres > backup/postgres_all_$(date +%Y%m%d_%H%M%S).sql
-```
-
-恢复整个 PostgreSQL：
-
-```bash
-cat backup/postgres_all_20260615_234500.sql | docker exec -i mail-postgres psql -U postgres
+cat $(ls -t backup/mail_admin_*.dump | head -n 1) | docker exec -i mail-postgres pg_restore -U mail_admin -d mail_admin --clean --if-exists
 ```
 
 ## 🔐 数据库密码
 
-可以在 compose 文件同目录创建 `.env`：
+默认不再提供数据库弱口令。首次部署时建议使用 `start-docker.sh`：
+
+```bash
+chmod +x start-docker.sh
+./start-docker.sh
+```
+
+脚本会创建 `.env`，并在密码为空或仍是占位值时自动生成随机强密码。
+
+也可以手动创建或编辑 `.env`：
 
 ```env
+POSTGRES_DB=mail_admin
+POSTGRES_USER=mail_admin
 POSTGRES_PASSWORD=请改成强密码
 TZ=Asia/Shanghai
 ```
@@ -255,6 +290,8 @@ TZ=Asia/Shanghai
 ```bash
 docker compose up -d
 ```
+
+如果 `.env` 里没有有效的 `POSTGRES_PASSWORD`，直接运行 `docker compose up -d` 会失败。这是为了避免默认弱口令。
 
 已经初始化过的 PostgreSQL 数据卷不会因为修改 `.env` 自动改旧密码。生产环境建议首次启动前就设置好强密码。
 
@@ -277,6 +314,9 @@ docker compose up -d
 MailPlus/
 ├─ docker-compose.yml                  普通单开部署文件
 ├─ docker-compose.shared-postgres.yml  共用 PostgreSQL 的多开模板
+├─ .env.example                        环境变量模板
+├─ .env                                实际生效配置，部署时使用
+├─ start-docker.sh                     Linux 启动脚本，可自动生成数据库强密码
 ├─ Dockerfile                          Docker 镜像构建文件
 ├─ frontend-server.js                  容器内前端静态服务
 ├─ start.sh                            容器启动脚本
@@ -446,3 +486,4 @@ docker compose up -d
 ## ⚠️ 免责声明
 
 本项目仅用于学习、测试和管理自己拥有合法授权的邮箱资源。请勿用于未授权访问、垃圾邮件、撞库、绕过服务商限制或其他违法违规用途。使用本项目产生的风险和责任由使用者自行承担。
+

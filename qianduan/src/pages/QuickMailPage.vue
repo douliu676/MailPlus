@@ -9,6 +9,7 @@ import { authSessionClearedEvent, authSessionClearedStorageKey, clearAuthSession
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
 import { mailContactEmails } from '../utils/mailContacts'
+import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
 type FolderKey = 'inbox' | 'trash'
 type MailMode = 'imap' | 'outlook'
@@ -149,6 +150,7 @@ const emptyText = computed(() => {
 })
 
 const selectedMessagePlainHtml = computed(() => linkifyText(selectedMessage.value?.body || '暂无正文'))
+const selectedMessageSafeHtml = computed(() => sanitizeMailHtml(selectedMessage.value?.html || ''))
 
 function escapeHTML(value: string) {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;')
@@ -498,7 +500,7 @@ function toggleKeyVisible() {
                 <span>时间：{{ selectedMessage.time || '-' }}</span>
                 <span>所属：{{ selectedMessage.folder === 'trash' ? '垃圾箱' : '收件箱' }}</span>
               </div>
-              <div v-if="selectedMessage.html" class="quick-mail-detail-body" v-html="selectedMessage.html"></div>
+              <div v-if="selectedMessage.html" class="quick-mail-detail-body" v-html="selectedMessageSafeHtml"></div>
               <div v-else class="quick-mail-detail-body quick-mail-detail-plain" v-html="selectedMessagePlainHtml"></div>
             </article>
           </div>

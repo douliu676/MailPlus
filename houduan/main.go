@@ -54,7 +54,6 @@ import (
 const (
 	defaultAdminAccount    = "admin"
 	defaultAdminPassword   = "admin123"
-	defaultDatabaseURL     = "postgres://postgres:postgres@localhost:5432/mail_admin?sslmode=disable"
 	defaultPublicLogoPath  = "/logo.png"
 	exportIDBatchSize      = 5000
 	taskProgressBatchSize  = 5000
@@ -523,11 +522,12 @@ type authUser struct {
 }
 
 type authResponse struct {
-	AccessToken  string   `json:"access_token"`
-	RefreshToken string   `json:"refresh_token"`
-	ExpiresIn    int      `json:"expires_in"`
-	TokenType    string   `json:"token_type"`
-	User         authUser `json:"user"`
+	AccessToken        string   `json:"access_token"`
+	RefreshToken       string   `json:"refresh_token"`
+	ExpiresIn          int      `json:"expires_in"`
+	TokenType          string   `json:"token_type"`
+	MustChangePassword bool     `json:"must_change_password"`
+	User               authUser `json:"user"`
 }
 
 type adminUserResponse struct {
@@ -820,6 +820,10 @@ func main() {
 		panic(fmt.Errorf("run database migration: %w", err))
 	}
 
+	if err := ensureUserSecurityColumns(ctx); err != nil {
+		panic(fmt.Errorf("ensure user security columns: %w", err))
+	}
+
 	if err := ensureBalanceRecordTable(ctx); err != nil {
 		panic(fmt.Errorf("ensure balance record table: %w", err))
 	}
@@ -908,7 +912,7 @@ func main() {
 		}
 		api.POST("/admin/quick-mail/imap/receive", state.quickMailReceiveIMAP)
 		api.POST("/admin/quick-mail/outlook/receive", state.quickMailReceiveOutlook)
-		adminAPI := api.Group("/admin", state.authMiddleware())
+		adminAPI := api.Group("/admin", state.authMiddleware(), state.adminMiddleware())
 		{
 			adminAPI.GET("/settings", state.getAdminSettings)
 			adminAPI.PUT("/settings", state.updateAdminSettings)
@@ -1047,11 +1051,29 @@ func openDB() *ent.Client {
 }
 
 func databaseURL() string {
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
-		return defaultDatabaseURL
+		panic("DATABASE_URL is required; configure a dedicated PostgreSQL user with a strong password")
+	}
+	if isUnsafeDefaultDatabaseURL(dsn) {
+		panic("DATABASE_URL uses the unsafe default credential postgres/postgres; configure a dedicated PostgreSQL user with a strong password")
 	}
 	return dsn
+}
+
+func isUnsafeDefaultDatabaseURL(dsn string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(dsn))
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
+		return false
+	}
+	password, hasPassword := parsed.User.Password()
+	if !hasPassword || password == "" || strings.Contains(strings.ToUpper(password), "CHANGE_ME") {
+		return true
+	}
+	return strings.EqualFold(parsed.User.Username(), "postgres") && password == "postgres"
 }
 
 func ensureDatabase(dsn string) {
@@ -1115,15 +1137,23 @@ func seedDefaults(ctx context.Context, db *ent.Client) error {
 			return err
 		}
 
-		if _, err := db.User.Create().
+		admin, err := db.User.Create().
 			SetUsername(defaultAdminAccount).
 			SetEmail("admin@example.com").
 			SetPasswordHash(string(hash)).
 			SetRole("admin").
 			SetEnabled(true).
-			Save(ctx); err != nil {
+			Save(ctx)
+		if err != nil {
 			return err
 		}
+		if err := setMustChangePassword(ctx, admin.ID, true); err != nil {
+			return err
+		}
+	}
+
+	if err := markDefaultPasswordUsersMustChange(ctx, db); err != nil {
+		return err
 	}
 
 	if err := cleanupRemovedSystemSettings(ctx, db); err != nil {
@@ -1148,6 +1178,59 @@ func seedDefaults(ctx context.Context, db *ent.Client) error {
 	}
 
 	return nil
+}
+
+func ensureUserSecurityColumns(ctx context.Context) error {
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.ExecContext(ctx, `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE
+`)
+	return err
+}
+
+func markDefaultPasswordUsersMustChange(ctx context.Context, db *ent.Client) error {
+	items, err := db.User.Query().All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if bcrypt.CompareHashAndPassword([]byte(item.PasswordHash), []byte(defaultAdminPassword)) == nil {
+			if err := setMustChangePassword(ctx, item.ID, true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func userMustChangePassword(ctx context.Context, id int) bool {
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+
+	var mustChange bool
+	if err := db.QueryRowContext(ctx, `SELECT must_change_password FROM users WHERE id = $1`, id).Scan(&mustChange); err != nil {
+		return false
+	}
+	return mustChange
+}
+
+func setMustChangePassword(ctx context.Context, id int, value bool) error {
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.ExecContext(ctx, `UPDATE users SET must_change_password = $2, updated_at = NOW() WHERE id = $1`, id, value)
+	return err
 }
 
 func cleanupRemovedSystemSettings(ctx context.Context, db *ent.Client) error {
@@ -2684,14 +2767,16 @@ func (s *appState) login(c *gin.Context) {
 	expiresIn := int((2 * time.Hour).Seconds())
 	s.sessions.set(accessToken, admin.ID, time.Duration(expiresIn)*time.Second)
 	s.sessions.set(refreshToken, admin.ID, 24*time.Hour)
+	mustChangePassword := userMustChangePassword(c.Request.Context(), admin.ID)
 
 	c.JSON(http.StatusOK, apiResponse{
 		Code: 0,
 		Data: authResponse{
-			AccessToken:  accessToken,
-			RefreshToken: refreshToken,
-			ExpiresIn:    expiresIn,
-			TokenType:    "Bearer",
+			AccessToken:        accessToken,
+			RefreshToken:       refreshToken,
+			ExpiresIn:          expiresIn,
+			TokenType:          "Bearer",
+			MustChangePassword: mustChangePassword,
 			User: authUser{
 				ID:        admin.ID,
 				Username:  admin.Username,
@@ -2765,6 +2850,10 @@ func (s *appState) changePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u5bc6\u7801\u81f3\u5c11\u9700\u8981 8 \u4e2a\u5b57\u7b26"})
 		return
 	}
+	if req.NewPassword == defaultAdminPassword {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "New password cannot use the default initial password"})
+		return
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(current.PasswordHash), []byte(req.OldPassword)); err != nil {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u5f53\u524d\u5bc6\u7801\u9519\u8bef"})
 		return
@@ -2776,6 +2865,10 @@ func (s *appState) changePassword(c *gin.Context) {
 		return
 	}
 	if _, err := current.Update().SetPasswordHash(string(hash)).Save(c.Request.Context()); err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u5bc6\u7801\u4fee\u6539\u5931\u8d25"})
+		return
+	}
+	if err := setMustChangePassword(c.Request.Context(), current.ID, false); err != nil {
 		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u5bc6\u7801\u4fee\u6539\u5931\u8d25"})
 		return
 	}
@@ -2867,33 +2960,7 @@ func (s *appState) listUsers(c *gin.Context) {
 }
 
 func (s *appState) createUser(c *gin.Context) {
-	var req saveUserRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u8bf7\u6c42\u53c2\u6570\u9519\u8bef"})
-		return
-	}
-	if req.Username == "" || req.Password == "" {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u7528\u6237\u540d\u548c\u5bc6\u7801\u4e0d\u80fd\u4e3a\u7a7a"})
-		return
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u521b\u5efa\u7528\u6237\u5931\u8d25"})
-		return
-	}
-
-	enabled := true
-	if req.Enabled != nil {
-		enabled = *req.Enabled
-	}
-
-	item, err := createUserWithReusableID(c.Request.Context(), req.Username, req.Email, string(hash), req.Balance, "user", enabled)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u7528\u6237\u540d\u5df2\u5b58\u5728\u6216\u53c2\u6570\u65e0\u6548"})
-		return
-	}
-
-	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: toAdminUser(item), Msg: "ok"})
+	c.JSON(http.StatusForbidden, apiResponse{Code: 403, Msg: "User creation is disabled"})
 }
 
 func createUserWithReusableID(ctx context.Context, username, email, passwordHash string, balance float64, role string, enabled bool) (*ent.User, error) {
@@ -7188,6 +7255,25 @@ func (s *appState) authMiddleware() gin.HandlerFunc {
 		}
 
 		c.Set("user_id", session.UserID)
+		c.Next()
+	}
+}
+
+func (s *appState) adminMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		current, ok := s.currentUser(c)
+		if !ok {
+			c.Abort()
+			return
+		}
+		if !current.Enabled || current.Role != "admin" {
+			c.AbortWithStatusJSON(http.StatusForbidden, apiResponse{Code: 403, Msg: "Admin permission required"})
+			return
+		}
+		if userMustChangePassword(c.Request.Context(), current.ID) {
+			c.AbortWithStatusJSON(http.StatusForbidden, apiResponse{Code: 403, Msg: "Password change required"})
+			return
+		}
 		c.Next()
 	}
 }
