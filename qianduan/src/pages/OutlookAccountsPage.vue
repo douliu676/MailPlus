@@ -1454,6 +1454,7 @@ function buildCustomAuthURL() {
 }
 
 function handleOAuthMessage(event: MessageEvent) {
+  if (event.origin !== window.location.origin) return
   if (event.data?.type !== 'outlook-oauth-callback') return
   if (!event.data.success) {
     appStore.showError(event.data.error || '授权失败')

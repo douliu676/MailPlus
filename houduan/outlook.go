@@ -1386,13 +1386,14 @@ func (s *appState) outlookOAuthExchange(c *gin.Context) {
 }
 
 func (s *appState) outlookOAuthCallback(c *gin.Context) {
+	targetOrigin := outlookCallbackOrigin(c.Request)
 	if errMsg := c.Query("error"); errMsg != "" {
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(false, "授权失败: "+valueOrDefault(c.Query("error_description"), errMsg), nil)))
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(false, "授权失败: "+valueOrDefault(c.Query("error_description"), errMsg), nil, targetOrigin)))
 		return
 	}
 	code := strings.TrimSpace(c.Query("code"))
 	if code == "" {
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(false, "未收到授权码", nil)))
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(false, "未收到授权码", nil, targetOrigin)))
 		return
 	}
 	oauthState := strings.TrimSpace(c.Query("state"))
@@ -1405,13 +1406,13 @@ func (s *appState) outlookOAuthCallback(c *gin.Context) {
 	}
 	token, err := exchangeOutlookAuthCode(c.Request.Context(), clientID, code, outlookCallbackURL(c.Request))
 	if err != nil {
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(false, "换取 token 失败: "+err.Error(), nil)))
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(false, "换取 token 失败: "+err.Error(), nil, targetOrigin)))
 		return
 	}
 	if oauthState != "" {
 		s.outlookOAuth.complete(oauthState, token.RefreshToken)
 	}
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(true, "", gin.H{"client_id": clientID, "refresh_token": token.RefreshToken})))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(outlookCallbackPage(true, "", gin.H{"client_id": clientID, "refresh_token": token.RefreshToken}, targetOrigin)))
 }
 
 func (s *appState) outlookOAuthResult(c *gin.Context) {
@@ -2546,7 +2547,16 @@ func outlookCallbackURL(req *http.Request) string {
 	return scheme + "://" + host + "/api/admin/outlook-oauth/callback"
 }
 
-func outlookCallbackPage(success bool, errText string, data gin.H) string {
+func outlookCallbackOrigin(req *http.Request) string {
+	callbackURL := outlookCallbackURL(req)
+	parsed, err := url.Parse(callbackURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func outlookCallbackPage(success bool, errText string, data gin.H, targetOrigin string) string {
 	dataJSON := "null"
 	if data != nil {
 		bytes, _ := json.Marshal(data)
@@ -2569,10 +2579,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 </style></head><body><div class="card"><h2 class="` + className + `">` + title + `</h2><p>` + body + `</p></div>
 <script>
 var result={success:` + strconv.FormatBool(success) + `,data:` + dataJSON + `,error:` + strconv.Quote(errText) + `};
+var targetOrigin=` + strconv.Quote(targetOrigin) + `;
 function notifyOpener(){
   if(!window.opener || window.opener.closed){return false}
+  if(!targetOrigin){return false}
   try{
-    window.opener.postMessage({type:'outlook-oauth-callback',success:result.success,data:result.data,error:result.error},'*');
+    window.opener.postMessage({type:'outlook-oauth-callback',success:result.success,data:result.data,error:result.error},targetOrigin);
     return true;
   }catch(e){return false}
 }

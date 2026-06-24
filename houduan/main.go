@@ -61,6 +61,9 @@ const (
 	taskCompletedMaxAge    = 24 * time.Hour
 	taskStaleMaxAge        = 3 * 24 * time.Hour
 	batchDeleteSize        = 1000
+	loginFailureWindow     = 10 * time.Minute
+	loginBlockDuration     = 15 * time.Minute
+	loginMaxFailures       = 5
 	updateCheckTimeout     = 8 * time.Second
 	updateCheckCacheTTL    = 20 * time.Minute
 	updateCheckMaxBodySize = 1 << 20
@@ -135,6 +138,7 @@ var removedSystemSettingKeys = []string{
 type appState struct {
 	db           *ent.Client
 	sessions     *sessionStore
+	loginLimiter *loginRateLimiter
 	outlookOAuth *outlookOAuthStore
 	tasks        *taskStore
 	proxies      *proxyRuntime
@@ -176,6 +180,188 @@ func (s *sessionStore) get(token string) (authSession, bool) {
 		return authSession{}, false
 	}
 	return session, true
+}
+
+type loginRateLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]loginAttemptState
+}
+
+type loginAttemptState struct {
+	Failures     int
+	FirstFailure time.Time
+	BlockedUntil time.Time
+	LastSeen     time.Time
+}
+
+func newLoginRateLimiter() *loginRateLimiter {
+	return &loginRateLimiter{attempts: map[string]loginAttemptState{}}
+}
+
+func (l *loginRateLimiter) blocked(ip string, account string) (time.Duration, bool) {
+	if l == nil {
+		return 0, false
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneLocked(now)
+	var retryAfter time.Duration
+	for _, key := range loginRateLimitKeys(ip, account) {
+		state := l.attempts[key]
+		if state.BlockedUntil.After(now) {
+			if remaining := time.Until(state.BlockedUntil); remaining > retryAfter {
+				retryAfter = remaining
+			}
+		}
+	}
+	return retryAfter, retryAfter > 0
+}
+
+func (l *loginRateLimiter) recordFailure(ip string, account string) {
+	if l == nil {
+		return
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneLocked(now)
+	for _, key := range loginRateLimitKeys(ip, account) {
+		state := l.attempts[key]
+		if state.FirstFailure.IsZero() || now.Sub(state.FirstFailure) > loginFailureWindow {
+			state = loginAttemptState{FirstFailure: now}
+		}
+		state.Failures++
+		state.LastSeen = now
+		if state.Failures >= loginMaxFailures {
+			state.BlockedUntil = now.Add(loginBlockDuration)
+		}
+		l.attempts[key] = state
+	}
+}
+
+func (l *loginRateLimiter) recordSuccess(ip string, account string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, key := range loginRateLimitKeys(ip, account) {
+		delete(l.attempts, key)
+	}
+}
+
+func (l *loginRateLimiter) pruneLocked(now time.Time) {
+	for key, state := range l.attempts {
+		if state.BlockedUntil.After(now) {
+			continue
+		}
+		if !state.LastSeen.IsZero() && now.Sub(state.LastSeen) <= loginFailureWindow {
+			continue
+		}
+		delete(l.attempts, key)
+	}
+}
+
+func loginRateLimitKeys(ip string, account string) []string {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		ip = "unknown"
+	}
+	account = strings.ToLower(strings.TrimSpace(account))
+	if account == "" {
+		account = "empty"
+	}
+	return []string{
+		"ip:" + ip,
+		"account:" + ip + ":" + account,
+	}
+}
+
+var safeOutboundHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext:           safeOutboundDialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("redirect limit exceeded")
+		}
+		return validateOutboundRequestURL(req.URL)
+	},
+}
+
+func doSafeOutboundHTTP(req *http.Request) (*http.Response, error) {
+	if err := validateOutboundRequestURL(req.URL); err != nil {
+		return nil, err
+	}
+	return safeOutboundHTTPClient.Do(req)
+}
+
+func safeOutboundDialContext(ctx context.Context, network string, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %s: no address", host)
+	}
+	for _, item := range ips {
+		if isBlockedOutboundIP(item.IP) {
+			return nil, fmt.Errorf("blocked unsafe outbound address: %s", item.IP.String())
+		}
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	var lastErr error
+	for _, item := range ips {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(item.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func validateOutboundRequestURL(value *url.URL) error {
+	if value == nil {
+		return errors.New("request URL is empty")
+	}
+	scheme := strings.ToLower(value.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return errors.New("only http/https outbound requests are allowed")
+	}
+	if strings.TrimSpace(value.Hostname()) == "" {
+		return errors.New("request host is empty")
+	}
+	if value.User != nil {
+		return errors.New("URL credentials are not allowed")
+	}
+	return nil
+}
+
+func isBlockedOutboundIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
+		if ip4.Equal(net.ParseIP("100.100.100.200").To4()) {
+			return true
+		}
+	}
+	return false
 }
 
 type apiResponse struct {
@@ -870,7 +1056,7 @@ func main() {
 
 	proxyRuntime := defaultProxyRuntime
 	defer proxyRuntime.stop()
-	state := &appState{db: db, sessions: newSessionStore(), outlookOAuth: newOutlookOAuthStore(), tasks: newTaskStore(), proxies: proxyRuntime, updates: newUpdateCheckCache()}
+	state := &appState{db: db, sessions: newSessionStore(), loginLimiter: newLoginRateLimiter(), outlookOAuth: newOutlookOAuthStore(), tasks: newTaskStore(), proxies: proxyRuntime, updates: newUpdateCheckCache()}
 	state.backups = newBackupScheduler(state)
 	taskCleanupStop := make(chan struct{})
 	defer close(taskCleanupStop)
@@ -2005,7 +2191,7 @@ func uploadBackupToWebDAV(ctx context.Context, settings webDAVBackupSettings, lo
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := http.DefaultClient.Do(req)
+	response, err := doSafeOutboundHTTP(req)
 	if err != nil {
 		return err
 	}
@@ -2038,7 +2224,7 @@ func testWebDAVBackupStorage(ctx context.Context, settings webDAVBackupSettings)
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := http.DefaultClient.Do(req)
+	response, err := doSafeOutboundHTTP(req)
 	if err != nil {
 		return err
 	}
@@ -2121,7 +2307,7 @@ func listWebDAVDatabaseBackups(ctx context.Context, settings webDAVBackupSetting
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := http.DefaultClient.Do(req)
+	response, err := doSafeOutboundHTTP(req)
 	if err != nil {
 		return nil, err
 	}
@@ -2187,7 +2373,7 @@ func deleteWebDAVFile(ctx context.Context, settings webDAVBackupSettings, filena
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := http.DefaultClient.Do(req)
+	response, err := doSafeOutboundHTTP(req)
 	if err != nil {
 		return err
 	}
@@ -2216,7 +2402,7 @@ func ensureWebDAVDirectory(ctx context.Context, baseURL string, settings webDAVB
 		if settings.Username != "" || settings.Password != "" {
 			req.SetBasicAuth(settings.Username, settings.Password)
 		}
-		response, err := http.DefaultClient.Do(req)
+		response, err := doSafeOutboundHTTP(req)
 		if err != nil {
 			return err
 		}
@@ -2574,7 +2760,7 @@ func fetchLatestGitHubReleaseOnce(ctx context.Context, sourceURL string) (github
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "mail-admin/"+strings.TrimPrefix(appVersion, "v"))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doSafeOutboundHTTP(req)
 	if err != nil {
 		return githubLatestReleaseResponse{}, true, friendlyUpdateCheckError(err)
 	}
@@ -2750,17 +2936,27 @@ func (s *appState) login(c *gin.Context) {
 	if account == "" {
 		account = req.Email
 	}
+	account = strings.TrimSpace(account)
+	clientIP := c.ClientIP()
+	if retryAfter, blocked := s.loginLimiter.blocked(clientIP, account); blocked {
+		c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		c.JSON(http.StatusTooManyRequests, apiResponse{Code: 429, Msg: "\u767b\u5f55\u5931\u8d25\u6b21\u6570\u8fc7\u591a\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5"})
+		return
+	}
 
 	admin, err := s.db.User.Query().Where(user.Username(account)).Only(c.Request.Context())
 	if err != nil || !admin.Enabled {
+		s.loginLimiter.recordFailure(clientIP, account)
 		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef"})
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(admin.PasswordHash), []byte(req.Password)); err != nil {
+		s.loginLimiter.recordFailure(clientIP, account)
 		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef"})
 		return
 	}
+	s.loginLimiter.recordSuccess(clientIP, account)
 
 	accessToken := newToken()
 	refreshToken := newToken()
