@@ -334,6 +334,16 @@ function toggleSidebar() {
   localStorage.setItem(sidebarStorageKey, String(sidebarCollapsed.value))
 }
 
+function toggleHeaderSidebar() {
+  if (window.innerWidth < 768) {
+    openMobileSidebar()
+    return
+  }
+
+  closeMobileSidebar()
+  toggleSidebar()
+}
+
 function openMobileSidebar() {
   mobileSidebarOpen.value = true
 }
@@ -545,7 +555,7 @@ function handleKeydown(event: KeyboardEvent) {
     <div class="admin-content-shell relative min-h-screen overflow-hidden" :class="sidebarCollapsed ? 'pl-[68px]' : 'pl-[232px]'">
       <header class="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-gray-200 bg-white/80 px-6 backdrop-blur dark:border-dark-800 dark:bg-dark-900/80">
         <div class="flex min-w-0 items-center gap-3">
-          <button class="admin-mobile-menu-button md:hidden" type="button" aria-label="Open menu" @click="openMobileSidebar">
+          <button class="admin-mobile-menu-button" type="button" aria-label="切换侧边栏" title="切换侧边栏" @click="toggleHeaderSidebar">
             <Menu class="h-5 w-5" />
           </button>
           <div class="min-w-0">
