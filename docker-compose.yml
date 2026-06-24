@@ -27,7 +27,7 @@ services:
     # 【多开必改】app 容器名；第二套改成 mail_1，第三套改成 mail_2。
     container_name: mail
     # 使用 Docker Hub 上已发布的 MailPlus 镜像；升级时改成新的版本号。
-    image: douliu676/mailplus:v1.0.1
+    image: douliu676/mailplus:1.0.1
     # 容器异常退出或 Docker 重启后自动恢复，手动停止除外。
     restart: unless-stopped
     # 端口映射：冒号左边是宿主机端口，冒号右边是容器内部端口。

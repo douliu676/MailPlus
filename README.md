@@ -15,7 +15,7 @@
     <img src="https://img.shields.io/badge/Docker%20Hub-douliu676%2Fmailplus-2496ed?style=flat-square&logo=docker&logoColor=white" alt="Docker Hub" />
     <img src="https://img.shields.io/badge/Multi--Arch-amd64%20%7C%20arm64%20%7C%20armv7-22c55e?style=flat-square" alt="Multi Arch" />
     <img src="https://img.shields.io/badge/Self--Hosted-Yes-111827?style=flat-square" alt="Self Hosted" />
-    <img src="https://img.shields.io/badge/Release-v1.0.1-f59e0b?style=flat-square" alt="Release" />
+    <img src="https://img.shields.io/badge/Release-1.0.1-f59e0b?style=flat-square" alt="Release" />
   </p>
 
   <p>
@@ -104,7 +104,7 @@ admin / admin123
 
 | 服务 | 镜像 |
 | --- | --- |
-| MailPlus | `douliu676/mailplus:v1.0.1` |
+| MailPlus | `douliu676/mailplus:1.0.1` |
 | PostgreSQL | `postgres:18-alpine` |
 
 MailPlus 已发布为多架构镜像，用户安装时 Docker 会根据设备类型自动选择：
@@ -126,7 +126,7 @@ linux/arm/v7
 - 后台能力：卡密日志、用户管理、系统设置、个人资料、任务中心和 Docker 一键部署。
 - 部署能力：支持普通独立多开和共用 PostgreSQL 多开，镜像支持 `linux/amd64`、`linux/arm64`、`linux/arm/v7`。
 
-### v1.0.1
+### 1.0.1
 
 - 数据库备份新增定时备份和手动备份，支持本地保存，也支持开启 WebDAV 后同步上传。
 - 备份保留份数默认改为 3 份，本地和 WebDAV 都会按保留份数清理。
@@ -371,7 +371,7 @@ sequenceDiagram
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64,linux/arm/v7 \
-  -t douliu676/mailplus:v1.0.1 \
+  -t douliu676/mailplus:1.0.1 \
   -t douliu676/mailplus:latest \
   --push .
 ```
@@ -379,7 +379,7 @@ docker buildx build \
 检查镜像架构：
 
 ```bash
-docker buildx imagetools inspect douliu676/mailplus:v1.0.1
+docker buildx imagetools inspect douliu676/mailplus:1.0.1
 docker buildx imagetools inspect douliu676/mailplus:latest
 ```
 
@@ -476,7 +476,7 @@ linux/arm/v7
 
 ### 如何升级 MailPlus？
 
-先修改 compose 里的镜像版本号，例如把 `v1.0.0` 改成 `v1.0.1`，然后执行：
+先修改 compose 里的镜像版本号，例如把 `1.0.0` 改成 `1.0.1`，然后执行：
 
 ```bash
 docker compose pull

@@ -27,7 +27,7 @@ services:
   # 第一套 MailPlus，默认启用。
   app:
     container_name: mail
-    image: douliu676/mailplus:v1.0.1
+    image: douliu676/mailplus:1.0.1
     restart: unless-stopped
     ports:
       # 第一套前端访问端口：http://服务器IP:4399
@@ -56,7 +56,7 @@ services:
   # 使用时删除这一整段前面的 #，并确认 container_name、ports、DATABASE_URL 数据库名都不重复。
   # app_1:
   #   container_name: mail_1
-  #   image: douliu676/mailplus:v1.0.1
+  #   image: douliu676/mailplus:1.0.1
   #   restart: unless-stopped
   #   ports:
   #     # 第二套前端访问端口：http://服务器IP:4499
@@ -85,7 +85,7 @@ services:
   # 使用时删除这一整段前面的 #，并确认 container_name、ports、DATABASE_URL 数据库名都不重复。
   # app_2:
   #   container_name: mail_2
-  #   image: douliu676/mailplus:v1.0.1
+  #   image: douliu676/mailplus:1.0.1
   #   restart: unless-stopped
   #   ports:
   #     # 第三套前端访问端口：http://服务器IP:4599
