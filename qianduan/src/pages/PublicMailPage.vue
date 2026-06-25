@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Copy, Inbox, Loader2, Moon, RefreshCw, Sun, XCircle } from 'lucide-vue-next'
 import AppLogo from '../components/AppLogo.vue'
+import SafeMailFrame from '../components/SafeMailFrame.vue'
 import { getPublicMailInfo, getPublicMailMessages, getPublicMailPlain, PublicMailApiError, type PublicMailInfo, type PublicMailMessage } from '../api/publicMail'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
 import { copyToClipboard } from '../utils/clipboard'
-import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
 const route = useRoute()
 const appStore = useAppStore()
@@ -22,7 +22,11 @@ const pageError = ref('')
 const fetchError = ref('')
 const autoFetchText = ref('')
 const cooldown = ref(0)
+const publicMailResultRef = ref<HTMLElement | null>(null)
+const publicMailMessageHeaderRef = ref<HTMLElement | null>(null)
+const publicMailFrameMinHeight = ref(800)
 let cooldownTimer: number | undefined
+let publicMailResultObserver: ResizeObserver | null = null
 
 const siteLogoSrc = computed(() => appStore.siteLogo.value)
 const pageTitle = computed(() => `API取件 - ${appStore.siteName.value}`)
@@ -47,11 +51,6 @@ const mailBodyText = computed(() => {
   if (!currentMessage.value) return ''
   return currentMessage.value.body || currentMessage.value.body_preview || ''
 })
-const mailHtmlSrcdoc = computed(() => {
-  const html = sanitizeMailHtml(currentMessage.value?.html || '').trim()
-  if (!html) return ''
-  return `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>body{margin:0;background:#fff;color:#111827;font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;word-break:break-word}img{max-width:100%;height:auto}a{color:#0f766e}</style></head><body>${html}</body></html>`
-})
 const emptyMessage = computed(() => {
   if (fetching.value) return '正在收取邮件...'
   if (fetchError.value) return fetchError.value
@@ -61,12 +60,18 @@ const emptyMessage = computed(() => {
 })
 
 onMounted(() => {
+  syncPageScrollLock()
+  window.addEventListener('resize', updatePublicMailFrameMinHeight)
   void appStore.fetchPublicSettings()
   void loadInfo()
 })
 
 onBeforeUnmount(() => {
   window.clearInterval(cooldownTimer)
+  window.removeEventListener('resize', updatePublicMailFrameMinHeight)
+  publicMailResultObserver?.disconnect()
+  publicMailResultObserver = null
+  setPageScrollLock(false)
 })
 
 watch(pageTitle, (title) => {
@@ -74,8 +79,45 @@ watch(pageTitle, (title) => {
 }, { immediate: true })
 
 watch(() => [cardKey.value, routeEmail.value, autoFetchMode.value], () => {
+  syncPageScrollLock()
   void loadInfo()
 })
+
+watch(currentMessage, () => {
+  void nextTick(() => {
+    observePublicMailResult()
+    updatePublicMailFrameMinHeight()
+  })
+})
+
+function syncPageScrollLock() {
+  setPageScrollLock(!autoFetchMode.value)
+}
+
+function setPageScrollLock(locked: boolean) {
+  document.documentElement.classList.toggle('public-mail-lock-scroll', locked)
+  document.body.classList.toggle('public-mail-lock-scroll', locked)
+}
+
+function observePublicMailResult() {
+  publicMailResultObserver?.disconnect()
+  publicMailResultObserver = null
+  if (!publicMailResultRef.value) return
+  publicMailResultObserver = new ResizeObserver(updatePublicMailFrameMinHeight)
+  publicMailResultObserver.observe(publicMailResultRef.value)
+}
+
+function updatePublicMailFrameMinHeight() {
+  const result = publicMailResultRef.value
+  const header = publicMailMessageHeaderRef.value
+  if (!result) {
+    publicMailFrameMinHeight.value = 800
+    return
+  }
+  const resultHeight = Math.floor(result.getBoundingClientRect().height)
+  const headerHeight = header ? Math.ceil(header.getBoundingClientRect().height) : 0
+  publicMailFrameMinHeight.value = Math.max(800, resultHeight - headerHeight - 24)
+}
 
 async function loadInfo() {
   if (!cardKey.value) {
@@ -285,20 +327,17 @@ function startCooldown(seconds: number) {
           </div>
         </section>
 
-        <section class="public-mail-result">
+        <section ref="publicMailResultRef" class="public-mail-result">
           <article v-if="currentMessage" class="public-mail-content">
-            <h1 class="public-mail-subject">{{ currentMessage.subject || '无标题' }}</h1>
-            <div class="public-mail-meta">
-              <span>发件人：{{ currentMessage.from || '-' }}</span>
-              <span>收件人：{{ currentMessage.to || '-' }}</span>
-              <span>时间：{{ currentMessage.time || '-' }}</span>
+            <div ref="publicMailMessageHeaderRef" class="public-mail-message-header">
+              <h1 class="public-mail-subject">{{ currentMessage.subject || '无标题' }}</h1>
+              <div class="public-mail-meta">
+                <span>发件人：{{ currentMessage.from || '-' }}</span>
+                <span>收件人：{{ currentMessage.to || '-' }}</span>
+                <span>时间：{{ currentMessage.time || '-' }}</span>
+              </div>
             </div>
-            <iframe v-if="mailHtmlSrcdoc" class="public-mail-html" sandbox="" :srcdoc="mailHtmlSrcdoc"></iframe>
-            <pre v-else-if="mailBodyText" class="public-mail-text">{{ mailBodyText }}</pre>
-            <div v-else class="public-mail-empty">
-              <Inbox class="h-5 w-5" />
-              <span>这封邮件没有可显示的正文</span>
-            </div>
+            <SafeMailFrame class="public-mail-html" :html="currentMessage.html" :text="mailBodyText" :title="currentMessage.subject || '邮件正文'" :min-height="publicMailFrameMinHeight" />
           </article>
 
           <div v-else class="public-mail-empty">
@@ -312,17 +351,32 @@ function startCooldown(seconds: number) {
 </template>
 
 <style scoped>
+:global(html.public-mail-lock-scroll),
+:global(body.public-mail-lock-scroll) {
+  height: 100%;
+  overflow: hidden;
+}
+
+:global(body.public-mail-lock-scroll #app) {
+  height: 100%;
+  overflow: hidden;
+}
+
 .public-mail-page {
   position: relative;
   isolation: isolate;
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   flex-direction: column;
   gap: 0.85rem;
+  overflow: hidden;
   background:
     radial-gradient(circle at 12% 0%, rgb(20 184 166 / 0.2), transparent 24rem),
     radial-gradient(circle at 88% 9%, rgb(45 212 191 / 0.13), transparent 28rem),
     #f3f4f6;
+  box-sizing: border-box;
   color: #111827;
   padding: 1rem;
 }
@@ -505,6 +559,7 @@ function startCooldown(seconds: number) {
   flex-direction: column;
   gap: 0.85rem;
   margin: 0 auto;
+  overflow: hidden;
 }
 
 .public-mail-panel,
@@ -807,15 +862,33 @@ function startCooldown(seconds: number) {
   display: flex;
   min-height: 0;
   flex: 1;
-  overflow: hidden;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .public-mail-content {
   display: flex;
   width: 100%;
-  min-height: 0;
+  min-height: 100%;
   flex-direction: column;
   padding: 1.05rem 1.15rem 1.15rem;
+}
+
+.public-mail-message-header {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  margin: -1.05rem -1.15rem 0.9rem;
+  border-bottom: 1px solid #e5e7eb;
+  background: rgb(255 255 255 / 0.96);
+  padding: 1.05rem 1.15rem 0.9rem;
+  backdrop-filter: blur(12px);
+}
+
+:global(html.dark) .public-mail-message-header,
+.public-mail-page.is-dark-mode .public-mail-message-header {
+  border-bottom-color: rgb(45 212 191 / 0.14);
+  background: rgb(15 23 42 / 0.96);
 }
 
 .public-mail-subject {
@@ -837,7 +910,7 @@ function startCooldown(seconds: number) {
   flex-shrink: 0;
   flex-wrap: wrap;
   gap: 0.55rem 1rem;
-  margin: 0.7rem 0 0.9rem;
+  margin: 0.7rem 0 0;
   color: #64748b;
   font-size: 0.82rem;
   font-weight: 800;
@@ -852,20 +925,31 @@ function startCooldown(seconds: number) {
 .public-mail-text {
   flex: 1;
   min-height: 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 0.65rem;
 }
 
 .public-mail-html {
+  display: flex;
   width: 100%;
-  background: #ffffff;
+  min-height: 100%;
+}
+
+.public-mail-html :deep(.safe-mail-viewer-shell) {
+  display: flex;
+  width: 100%;
+  min-height: 100%;
+  flex: 1;
+}
+
+.public-mail-html :deep(.safe-mail-viewer) {
+  flex: 1;
+  min-height: 100%;
 }
 
 :global(html.dark) .public-mail-html,
 .public-mail-page.is-dark-mode .public-mail-html,
 :global(html.dark) .public-mail-text,
 .public-mail-page.is-dark-mode .public-mail-text {
-  border-color: rgb(45 212 191 / 0.14);
+  color: inherit;
 }
 
 .public-mail-text {

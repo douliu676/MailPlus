@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useQueryClient } from '@tanstack/vue-query'
 import { Check, ChevronDown, ChevronRight, CircleHelp, Copy, Download, Folder, FolderPlus, Inbox, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Search, Send, Server, StickyNote, Trash2, Upload, X } from 'lucide-vue-next'
 import PaginationBar from '../components/PaginationBar.vue'
+import SafeMailFrame from '../components/SafeMailFrame.vue'
 import { useAppStore } from '../stores/app'
 import { useTaskStore } from '../stores/tasks'
 import { getAdminSettings } from '../api/adminSettings'
@@ -11,7 +12,7 @@ import { batchCreateMailAccounts, batchMailAction, createMailAccount, createMail
 import { copyToClipboard } from '../utils/clipboard'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { mailAccountPageCacheKey, mailManagementCacheKey, normalizeMailAccountPageCache, rememberMailAccountPage, type MailAccountPageCacheEntry } from '../utils/mailManagementCache'
-import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
+import { authSessionClearedEvent } from '../api/session'
 
 const appStore = useAppStore()
 const taskStore = useTaskStore()
@@ -391,15 +392,6 @@ function shouldShowMailStatusReason(item: MailAccount) {
   return !isMailStatusNormal(item.status) && Boolean(item.status_reason?.trim())
 }
 
-function escapeHTML(value: string) {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;')
-}
-
-function linkifyText(value: string) {
-  const escaped = escapeHTML(value || '')
-  return escaped.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>').replace(/\n/g, '<br />')
-}
-
 const sortedAccounts = computed(() => {
   return filteredAccounts.value
 })
@@ -435,9 +427,6 @@ const receiveVisibleMessages = computed(() => {
 })
 const receivePageStart = computed(() => (receiveTotal.value === 0 ? 0 : (receivePage.value - 1) * receivePageSize.value + 1))
 const receivePageEnd = computed(() => Math.min(receiveTotal.value, receivePage.value * receivePageSize.value))
-const selectedReceivePlainHtml = computed(() => linkifyText(selectedReceiveMessage.value?.body || '暂无正文'))
-const selectedReceiveSafeHtml = computed(() => sanitizeMailHtml(selectedReceiveMessage.value?.html || ''))
-
 watch(groupNameScrollMax, (max) => {
   if (groupNameScrollX.value > max) {
     groupNameScrollX.value = max
@@ -1319,6 +1308,40 @@ function saveReceiveCache(accountID: number) {
   }
 }
 
+function clearReceiveCacheStorage() {
+  Object.keys(localStorage).forEach((key) => {
+    if (key.startsWith(receiveCacheStoragePrefix)) {
+      localStorage.removeItem(key)
+    }
+  })
+}
+
+function clearReceiveSessionState() {
+  receiveDetailRequestID += 1
+  receiveWarmupRunID += 1
+  receiveModalOpen.value = false
+  receiveTarget.value = null
+  receiveFolder.value = 'inbox'
+  receiveSearchQuery.value = ''
+  receiveLoading.value = false
+  receiveDetailLoading.value = false
+  receivePage.value = 1
+  receivePageJump.value = ''
+  selectedReceiveMessage.value = null
+  receiveMessages.inbox = []
+  receiveMessages.trash = []
+  Object.keys(receiveCache).forEach((key) => {
+    delete receiveCache[Number(key)]
+  })
+  Object.keys(receiveDetailCache).forEach((key) => {
+    delete receiveDetailCache[Number(key)]
+  })
+  Object.keys(receiveDetailPending).forEach((key) => {
+    delete receiveDetailPending[Number(key)]
+  })
+  clearReceiveCacheStorage()
+}
+
 function openMailReceiveModal(item: MailAccount) {
   activeMailMenuID.value = null
   receiveDetailRequestID += 1
@@ -1820,6 +1843,7 @@ onMounted(async () => {
   updateGroupNameScrollMax()
   window.addEventListener('resize', updateMailColumnDividers)
   window.addEventListener('resize', updateGroupNameScrollMax)
+  window.addEventListener(authSessionClearedEvent, clearReceiveSessionState)
   document.addEventListener('click', handleClickOutside)
 })
 
@@ -1827,6 +1851,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(accountSearchTimer)
   window.removeEventListener('resize', updateMailColumnDividers)
   window.removeEventListener('resize', updateGroupNameScrollMax)
+  window.removeEventListener(authSessionClearedEvent, clearReceiveSessionState)
   document.removeEventListener('click', handleClickOutside)
 })
 </script>
@@ -2510,8 +2535,13 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div v-if="receiveDetailLoading" class="mt-5 text-sm text-gray-400 dark:text-dark-400">读取中...</div>
-              <div v-else-if="selectedReceiveMessage.html" class="mail-detail-content" v-html="selectedReceiveSafeHtml"></div>
-              <div v-else class="mail-detail-content mail-detail-plain" v-html="selectedReceivePlainHtml"></div>
+              <SafeMailFrame
+                v-else
+                class="mail-detail-content"
+                :html="selectedReceiveMessage.html"
+                :text="selectedReceiveMessage.body || selectedReceiveMessage.body_preview"
+                :title="selectedReceiveMessage.subject || '邮件正文'"
+              />
             </section>
           </div>
           <div v-if="!selectedReceiveMessage" class="mail-receive-footer">
@@ -3776,13 +3806,7 @@ html.dark .mail-receive-search input::placeholder {
 
 .mail-detail-content {
   margin-top: 1rem;
-  min-height: 19rem;
-  overflow: auto;
-  border-radius: 0.75rem;
-  border: 1px solid rgb(226 232 240);
-  background: rgb(248 250 252);
-  padding: 1.2rem;
-  color: rgb(31 41 55);
+  min-height: 0;
 }
 
 .mail-detail-content :deep(a),
@@ -3794,9 +3818,7 @@ html.dark .mail-receive-search input::placeholder {
 }
 
 .dark .mail-detail-content {
-  border-color: rgb(51 65 85);
-  background: rgb(15 23 42 / 0.45);
-  color: rgb(226 232 240);
+  color: inherit;
 }
 
 .dark .mail-detail-content :deep(a),

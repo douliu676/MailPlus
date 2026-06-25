@@ -4,13 +4,13 @@ import { useRoute } from 'vue-router'
 import { ArrowLeft, Copy, Eye, EyeOff, Inbox, Mail, Moon, RefreshCw, Search, Sun, Trash2, X } from 'lucide-vue-next'
 import AppLogo from '../components/AppLogo.vue'
 import PaginationBar from '../components/PaginationBar.vue'
+import SafeMailFrame from '../components/SafeMailFrame.vue'
 import { receiveQuickMail, type QuickMailMessage } from '../api/quickMail'
 import { authSessionClearedEvent, authSessionClearedStorageKey, clearAuthSession, getAuthToken, getAuthUserRole } from '../api/session'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
 import { copyToClipboard } from '../utils/clipboard'
 import { mailContactEmails } from '../utils/mailContacts'
-import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
 type FolderKey = 'inbox' | 'trash'
 type MailMode = 'imap' | 'outlook'
@@ -149,17 +149,6 @@ const emptyText = computed(() => {
   if (lastQueryEmail.value) return `${lastQueryEmail.value} 暂无邮件`
   return '暂无邮件'
 })
-
-const selectedMessagePlainHtml = computed(() => linkifyText(selectedMessage.value?.body || '暂无正文'))
-const selectedMessageSafeHtml = computed(() => sanitizeMailHtml(selectedMessage.value?.html || ''))
-
-function escapeHTML(value: string) {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;')
-}
-
-function linkifyText(value: string) {
-  return escapeHTML(value || '').replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>').replace(/\n/g, '<br />')
-}
 
 function applyStoredQuickMailSettings(currentMode: MailMode) {
   form.adminKey = readStoredAdminKey(currentMode)
@@ -488,21 +477,27 @@ function toggleKeyVisible() {
 
           <div v-else class="quick-mail-detail-area">
             <div class="quick-mail-detail-header">
-              <button class="quick-mail-back-button" type="button" @click="closeDetail">
-                <ArrowLeft class="h-4 w-4" />
-                <span>返回列表</span>
-              </button>
-            </div>
-            <article class="quick-mail-detail-content">
-              <h2>{{ selectedMessage.subject || '无标题' }}</h2>
+              <div class="quick-mail-detail-toolbar">
+                <button class="quick-mail-back-button" type="button" @click="closeDetail">
+                  <ArrowLeft class="h-4 w-4" />
+                  <span>返回列表</span>
+                </button>
+              </div>
+              <h2 class="quick-mail-detail-title">{{ selectedMessage.subject || '无标题' }}</h2>
               <div class="quick-mail-detail-meta">
                 <span>发件人：{{ selectedMessage.from || '-' }}</span>
                 <span>收件人：{{ selectedMessage.to || '-' }}</span>
                 <span>时间：{{ selectedMessage.time || '-' }}</span>
                 <span>所属：{{ selectedMessage.folder === 'trash' ? '垃圾箱' : '收件箱' }}</span>
               </div>
-              <div v-if="selectedMessage.html" class="quick-mail-detail-body" v-html="selectedMessageSafeHtml"></div>
-              <div v-else class="quick-mail-detail-body quick-mail-detail-plain" v-html="selectedMessagePlainHtml"></div>
+            </div>
+            <article class="quick-mail-detail-content">
+              <SafeMailFrame
+                class="quick-mail-detail-body"
+                :html="selectedMessage.html"
+                :text="selectedMessage.body || selectedMessage.body_preview"
+                :title="selectedMessage.subject || '邮件正文'"
+              />
             </article>
           </div>
         </section>
@@ -1052,19 +1047,31 @@ function toggleKeyVisible() {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .quick-mail-detail-header {
+  position: sticky;
+  top: 0;
+  z-index: 12;
   display: flex;
   flex-shrink: 0;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   border-bottom: 1px solid rgb(229 231 235);
   padding: 1rem;
+  background: rgb(255 255 255 / 0.96);
+  backdrop-filter: blur(12px);
 }
 
 .dark .quick-mail-detail-header {
   border-bottom-color: rgb(51 65 85 / 0.72);
+  background: rgb(15 23 42 / 0.96);
+}
+
+.quick-mail-detail-toolbar {
+  display: flex;
+  align-items: center;
 }
 
 .quick-mail-back-button {
@@ -1106,19 +1113,19 @@ function toggleKeyVisible() {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
   padding: 1rem;
 }
 
-.quick-mail-detail-content h2 {
+.quick-mail-detail-title {
   flex-shrink: 0;
-  margin: 0;
+  margin: 1rem 0 0;
   color: #111827;
   font-size: 1rem;
   font-weight: 800;
 }
 
-.dark .quick-mail-detail-content h2 {
+.dark .quick-mail-detail-title {
   color: #ffffff;
 }
 
@@ -1143,34 +1150,6 @@ function toggleKeyVisible() {
   max-width: 100%;
   min-height: 0;
   margin-top: 1rem;
-  overflow: auto;
-  overscroll-behavior: contain;
-  border: 1px solid rgb(226 232 240);
-  border-radius: 0.75rem;
-  background: rgb(248 250 252);
-  padding: 1.2rem;
-  box-sizing: border-box;
-  color: rgb(31 41 55);
-}
-
-.quick-mail-detail-body :deep(img),
-.quick-mail-detail-body :deep(video),
-.quick-mail-detail-body :deep(canvas),
-.quick-mail-detail-body :deep(table) {
-  max-width: 100% !important;
-}
-
-.quick-mail-detail-body :deep(img),
-.quick-mail-detail-body :deep(video),
-.quick-mail-detail-body :deep(canvas) {
-  height: auto !important;
-}
-
-.quick-mail-detail-body :deep(pre),
-.quick-mail-detail-body :deep(code),
-.quick-mail-detail-body :deep(td),
-.quick-mail-detail-body :deep(th) {
-  overflow-wrap: anywhere;
 }
 
 .quick-mail-detail-body :deep(a),
@@ -1182,9 +1161,7 @@ function toggleKeyVisible() {
 }
 
 .dark .quick-mail-detail-body {
-  border-color: rgb(51 65 85);
-  background: rgb(15 23 42 / 0.45);
-  color: rgb(226 232 240);
+  color: inherit;
 }
 
 .dark .quick-mail-detail-body :deep(a),

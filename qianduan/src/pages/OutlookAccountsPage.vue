@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useQueryClient } from '@tanstack/vue-query'
 import { Check, ChevronDown, ChevronRight, CircleHelp, Copy, Download, ExternalLink, Folder, FolderPlus, Inbox, KeyRound, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Search, StickyNote, Trash2, Upload, X } from 'lucide-vue-next'
 import PaginationBar from '../components/PaginationBar.vue'
+import SafeMailFrame from '../components/SafeMailFrame.vue'
 import { useAppStore } from '../stores/app'
 import { useTaskStore } from '../stores/tasks'
 import { getAdminSettings } from '../api/adminSettings'
@@ -10,7 +11,7 @@ import { batchCreateOutlookAccounts, batchOutlookAction, createOutlookAccount, c
 import { copyToClipboard } from '../utils/clipboard'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { normalizeOutlookAccountPageCache, outlookAccountPageCacheKey, outlookManagementCacheKey, rememberOutlookAccountPage, type OutlookAccountPageCacheEntry } from '../utils/outlookManagementCache'
-import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
+import { authSessionClearedEvent } from '../api/session'
 
 const appStore = useAppStore()
 const taskStore = useTaskStore()
@@ -374,9 +375,6 @@ const messageFolderName = computed(() => {
   if (selectedMessage.value?.folder === 'deleteditems') return '已删除'
   return '收件箱'
 })
-const selectedMessageBody = computed(() => linkifyText(selectedMessage.value?.body || selectedMessage.value?.body_preview || '暂无正文'))
-const selectedMessageSafeHtml = computed(() => sanitizeMailHtml(selectedMessage.value?.html || ''))
-
 watch(filteredAccounts, () => {
   const valid = new Set(filteredAccounts.value.map((item) => item.id))
   selectedIDs.value = selectedIDs.value.filter((id) => valid.has(id))
@@ -545,6 +543,7 @@ onMounted(() => {
   window.addEventListener('message', handleOAuthMessage)
   window.addEventListener('resize', updateOutlookVirtualViewport)
   window.addEventListener('resize', updateGroupNameScrollMax)
+  window.addEventListener(authSessionClearedEvent, clearReadSessionState)
   document.addEventListener('click', closeFloating)
 })
 
@@ -554,6 +553,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('message', handleOAuthMessage)
   window.removeEventListener('resize', updateOutlookVirtualViewport)
   window.removeEventListener('resize', updateGroupNameScrollMax)
+  window.removeEventListener(authSessionClearedEvent, clearReadSessionState)
   document.removeEventListener('click', closeFloating)
 })
 
@@ -1510,6 +1510,40 @@ function saveReadCache(accountID: number) {
   }
 }
 
+function clearReadCacheStorage() {
+  Object.keys(localStorage).forEach((key) => {
+    if (key.startsWith(readCacheStoragePrefix)) {
+      localStorage.removeItem(key)
+    }
+  })
+}
+
+function clearReadSessionState() {
+  readDetailRequestID += 1
+  readWarmupRunID += 1
+  readModalOpen.value = false
+  readTarget.value = null
+  readFolder.value = 'inbox'
+  readSearchQuery.value = ''
+  readLoading.value = false
+  readDetailLoading.value = false
+  readPage.value = 1
+  readPageJump.value = ''
+  selectedMessage.value = null
+  readMessages.inbox = []
+  readMessages.junkemail = []
+  Object.keys(readCache).forEach((key) => {
+    delete readCache[Number(key)]
+  })
+  Object.keys(readDetailCache).forEach((key) => {
+    delete readDetailCache[Number(key)]
+  })
+  Object.keys(readDetailPending).forEach((key) => {
+    delete readDetailPending[Number(key)]
+  })
+  clearReadCacheStorage()
+}
+
 function openReadModal(item: OutlookAccount) {
   readDetailRequestID += 1
   readWarmupRunID += 1
@@ -1661,14 +1695,6 @@ function statusClass(status: string) {
 
 function shouldShowStatusReason(item: OutlookAccount) {
   return statusClass(item.status) === 'badge-danger' && Boolean(item.status_reason?.trim())
-}
-
-function escapeHTML(value: string) {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;')
-}
-
-function linkifyText(value: string) {
-  return escapeHTML(value || '').replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>').replace(/\n/g, '<br />')
 }
 
 function closeFloating(event?: MouseEvent) {
@@ -2222,8 +2248,13 @@ function closeFloating(event?: MouseEvent) {
                 </div>
               </div>
               <div v-if="readDetailLoading" class="mt-5 text-sm text-gray-400 dark:text-dark-400">读取中...</div>
-              <div v-else-if="selectedMessage.html" class="outlook-detail-content" v-html="selectedMessageSafeHtml"></div>
-              <div v-else class="outlook-detail-content outlook-detail-plain" v-html="selectedMessageBody"></div>
+              <SafeMailFrame
+                v-else
+                class="outlook-detail-content"
+                :html="selectedMessage.html"
+                :text="selectedMessage.body || selectedMessage.body_preview"
+                :title="selectedMessage.subject || '邮件正文'"
+              />
             </section>
           </div>
           <div v-if="!selectedMessage" class="outlook-read-footer">
@@ -3592,13 +3623,7 @@ html.dark .outlook-read-search input::placeholder {
 
 .outlook-detail-content {
   margin-top: 1rem;
-  min-height: 19rem;
-  overflow: auto;
-  border-radius: 0.75rem;
-  border: 1px solid rgb(226 232 240);
-  background: rgb(248 250 252);
-  padding: 1.2rem;
-  color: rgb(31 41 55);
+  min-height: 0;
 }
 
 .outlook-detail-content :deep(a),
@@ -3610,9 +3635,7 @@ html.dark .outlook-read-search input::placeholder {
 }
 
 .dark .outlook-detail-content {
-  border-color: rgb(51 65 85);
-  background: rgb(15 23 42 / 0.45);
-  color: rgb(226 232 240);
+  color: inherit;
 }
 
 .dark .outlook-detail-content :deep(a),

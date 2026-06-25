@@ -29,9 +29,10 @@ import { copyToClipboard } from '../utils/clipboard'
 
 const appStore = useAppStore()
 const queryClient = useQueryClient()
-const fallbackTablePageSize = 20
+const fallbackTablePageSize = 10
 const fallbackTablePageSizeOptions = [10, 20, 50, 100]
 const pageSizeStorageKey = 'card_keys_page_size'
+const pageSizeUserSetStorageKey = 'card_keys_page_size_user_set'
 const activeGroupStorageKey = 'card_keys_active_group_id'
 const cardKeySortStorageKey = 'card_keys_sort'
 const cardKeyManagementCacheKey = 'card_key_management_cache_v1'
@@ -41,7 +42,8 @@ const outlookEmailPickerExpandedStorageKey = 'card_key_outlook_email_picker_expa
 const emailPickerActiveGroupStorageKey = 'card_key_email_picker_active_group_id'
 const outlookEmailPickerActiveGroupStorageKey = 'card_key_outlook_email_picker_active_group_id'
 const emailPickerAvailableCacheStorageKey = 'card_key_email_picker_available_cache_v1'
-const mailAccountPageSizeStorageKey = 'mail_accounts_page_size'
+const mailAccountPageSizeStorageKey = 'card_key_email_picker_page_size'
+const emailPickerPageSizeUserSetStorageKey = 'card_key_email_picker_page_size_user_set'
 
 type PaginationItem = { key: string; type: 'page'; page: number } | { key: string; type: 'ellipsis' }
 type CardKeySortKey = NonNullable<CardKeyListParams['sort_by']>
@@ -221,13 +223,50 @@ const cardKeyQueryKey = computed(() => [
   sortOrder.value,
 ])
 
-onMounted(() => {
+function normalizePageSizeOptions(values: unknown, defaultPageSize: number, currentPageSize?: number) {
+  const options = Array.isArray(values) ? values : fallbackTablePageSizeOptions
+  const result = options
+    .map((value) => Math.floor(Number(value) || 0))
+    .filter((value) => value > 0)
+
+  if (defaultPageSize > 0) result.push(defaultPageSize)
+  if (currentPageSize && currentPageSize > 0) result.push(currentPageSize)
+
+  return Array.from(new Set(result)).sort((a, b) => a - b)
+}
+
+function tableDefaultPageSize(settings = appStore.cachedPublicSettings.value) {
+  const value = Math.floor(Number(settings?.table_default_page_size) || fallbackTablePageSize)
+  return value > 0 ? value : fallbackTablePageSize
+}
+
+function pageSizeWasUserSet(storageKey: string) {
+  return localStorage.getItem(storageKey) === 'true'
+}
+
+function applyPublicPageSizeSettings(settings = appStore.cachedPublicSettings.value) {
+  const defaultPageSize = tableDefaultPageSize(settings)
+  pageSizeOptions.value = normalizePageSizeOptions(settings?.table_page_size_options, defaultPageSize, pageSize.value)
+  emailPickerPageSizeOptions.value = normalizePageSizeOptions(settings?.table_page_size_options, defaultPageSize, emailPickerPageSize.value)
+
+  if (!pageSizeWasUserSet(pageSizeUserSetStorageKey)) {
+    pageSize.value = defaultPageSize
+  }
+  if (!pageSizeWasUserSet(emailPickerPageSizeUserSetStorageKey)) {
+    emailPickerPageSize.value = defaultPageSize
+  }
+}
+
+onMounted(async () => {
+  applyPublicPageSizeSettings()
   restoreCardKeyManagementCache()
   cardKeyAutoRefreshEnabled = true
   document.addEventListener('click', handleDocumentClick)
   window.addEventListener('resize', updateGroupNameScrollMax)
   window.addEventListener('resize', updateEmailPickerGroupNameScrollMax)
   void refreshAll()
+  const settings = await appStore.fetchPublicSettings()
+  applyPublicPageSizeSettings(settings || appStore.cachedPublicSettings.value)
 })
 
 onBeforeUnmount(() => {
@@ -313,11 +352,13 @@ watch(cardKeys, () => {
 })
 
 function readPersistedPageSize() {
+  if (!pageSizeWasUserSet(pageSizeUserSetStorageKey)) return 0
   const value = Number(localStorage.getItem(pageSizeStorageKey))
   return Number.isFinite(value) && value > 0 ? value : 0
 }
 
 function readPersistedMailAccountPageSize() {
+  if (!pageSizeWasUserSet(emailPickerPageSizeUserSetStorageKey)) return 0
   const value = Number(localStorage.getItem(mailAccountPageSizeStorageKey))
   return Number.isFinite(value) && value > 0 ? value : 0
 }
@@ -596,7 +637,9 @@ function restoreCardKeyManagementCache() {
       currentPage.value = Number(value.pagination.page) || currentPage.value
       total.value = Number(value.pagination.total) || 0
       pages.value = Number(value.pagination.pages) || 0
-      pageSize.value = Number(value.pagination.page_size) || pageSize.value
+      if (pageSizeWasUserSet(pageSizeUserSetStorageKey)) {
+        pageSize.value = Number(value.pagination.page_size) || pageSize.value
+      }
     }
     if (value.query && typeof value.query === 'object') {
       activeGroupID.value = Number(value.query.group_id) || activeGroupID.value
@@ -818,7 +861,9 @@ async function saveGroup() {
 }
 
 function selectPageSize(size: number) {
-  pageSize.value = size
+  const nextSize = normalizePositiveInteger(size, fallbackTablePageSize)
+  localStorage.setItem(pageSizeUserSetStorageKey, 'true')
+  pageSize.value = nextSize
   pageSizeDropdownOpen.value = false
 }
 
@@ -1149,6 +1194,7 @@ function changeEmailPickerPage(page: number) {
 function selectEmailPickerPageSize(size: number) {
   const nextSize = normalizePositiveInteger(size, fallbackTablePageSize)
   if (nextSize === emailPickerPageSize.value) return
+  localStorage.setItem(emailPickerPageSizeUserSetStorageKey, 'true')
   emailPickerPageSize.value = nextSize
   localStorage.setItem(mailAccountPageSizeStorageKey, String(nextSize))
   emailPickerPage.value = 1

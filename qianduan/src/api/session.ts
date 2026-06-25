@@ -9,6 +9,7 @@ export function setSessionItem(key: string, value: string) {
 }
 
 const authStorageKeys = ['auth_token', 'refresh_token', 'auth_user', 'token_expires_at', 'must_change_password']
+const authScopedStoragePrefixes = ['mail_receive_cache_v1:', 'outlook_read_cache_v1:']
 export const authSessionClearedEvent = 'auth-session-cleared'
 export const authSessionClearedStorageKey = 'auth_session_cleared_at'
 
@@ -31,6 +32,11 @@ export function clearAuthSession(broadcast = true) {
   authStorageKeys.forEach((key) => {
     sessionStorage.removeItem(key)
     localStorage.removeItem(key)
+  })
+  Object.keys(localStorage).forEach((key) => {
+    if (authScopedStoragePrefixes.some((prefix) => key.startsWith(prefix))) {
+      localStorage.removeItem(key)
+    }
   })
 
   if (broadcast) {
