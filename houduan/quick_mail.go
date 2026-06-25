@@ -297,7 +297,7 @@ func quickMailPlainRouteParams(c *gin.Context) (string, int, bool) {
 }
 
 func (s *appState) authorizeQuickMailRequest(c *gin.Context, key string) bool {
-	if userID, ok := s.optionalAuthUserID(c); ok {
+	if userID, ok := s.optionalAdminAuthUserID(c); ok {
 		c.Set("user_id", userID)
 		return true
 	}
@@ -337,7 +337,7 @@ func (s *appState) authorizeQuickMailPlainRequest(c *gin.Context, key string) bo
 	return true
 }
 
-func (s *appState) optionalAuthUserID(c *gin.Context) (int, bool) {
+func (s *appState) optionalAdminAuthUserID(c *gin.Context) (int, bool) {
 	header := strings.TrimSpace(c.GetHeader("Authorization"))
 	if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
 		return 0, false
@@ -345,6 +345,13 @@ func (s *appState) optionalAuthUserID(c *gin.Context) (int, bool) {
 	token := strings.TrimSpace(header[len("Bearer "):])
 	session, ok := s.sessions.get(token)
 	if !ok {
+		return 0, false
+	}
+	current, err := s.db.User.Get(c.Request.Context(), session.UserID)
+	if err != nil || !current.Enabled || current.Role != "admin" {
+		return 0, false
+	}
+	if userMustChangePassword(c.Request.Context(), current.ID) {
 		return 0, false
 	}
 	return session.UserID, true

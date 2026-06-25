@@ -1,31 +1,37 @@
 export function getSessionItem(key: string) {
-  return sessionStorage.getItem(key)
+  migrateAuthSessionStorage()
+  return localStorage.getItem(key)
 }
 
 export function setSessionItem(key: string, value: string) {
-  sessionStorage.setItem(key, value)
+  localStorage.setItem(key, value)
+  sessionStorage.removeItem(key)
 }
 
 const authStorageKeys = ['auth_token', 'refresh_token', 'auth_user', 'token_expires_at', 'must_change_password']
 export const authSessionClearedEvent = 'auth-session-cleared'
 export const authSessionClearedStorageKey = 'auth_session_cleared_at'
 
-function clearLegacyLocalAuthStorage() {
+function migrateAuthSessionStorage() {
   authStorageKeys.forEach((key) => {
-    localStorage.removeItem(key)
+    const legacyValue = sessionStorage.getItem(key)
+    if (legacyValue && !localStorage.getItem(key)) {
+      localStorage.setItem(key, legacyValue)
+    }
+    sessionStorage.removeItem(key)
   })
 }
 
 export function setAuthSessionItem(key: string, value: string) {
-  clearLegacyLocalAuthStorage()
-  sessionStorage.setItem(key, value)
+  localStorage.setItem(key, value)
+  sessionStorage.removeItem(key)
 }
 
 export function clearAuthSession(broadcast = true) {
   authStorageKeys.forEach((key) => {
     sessionStorage.removeItem(key)
+    localStorage.removeItem(key)
   })
-  clearLegacyLocalAuthStorage()
 
   if (broadcast) {
     const value = String(Date.now())
@@ -35,13 +41,23 @@ export function clearAuthSession(broadcast = true) {
 }
 
 export function getAuthToken() {
-  clearLegacyLocalAuthStorage()
-  const expiresAt = Number(sessionStorage.getItem('token_expires_at') || 0)
+  migrateAuthSessionStorage()
+  const expiresAt = Number(localStorage.getItem('token_expires_at') || 0)
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     clearAuthSession()
     return ''
   }
-  return sessionStorage.getItem('auth_token') || ''
+  return localStorage.getItem('auth_token') || ''
+}
+
+export function getAuthUserRole() {
+  migrateAuthSessionStorage()
+  try {
+    const user = JSON.parse(localStorage.getItem('auth_user') || 'null') as { role?: unknown } | null
+    return typeof user?.role === 'string' ? user.role : ''
+  } catch {
+    return ''
+  }
 }
 
 export function installAuthFetchInterceptor() {

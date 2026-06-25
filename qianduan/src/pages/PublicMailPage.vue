@@ -6,6 +6,7 @@ import AppLogo from '../components/AppLogo.vue'
 import { getPublicMailInfo, getPublicMailMessages, getPublicMailPlain, PublicMailApiError, type PublicMailInfo, type PublicMailMessage } from '../api/publicMail'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
+import { copyToClipboard } from '../utils/clipboard'
 import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
 const route = useRoute()
@@ -176,7 +177,7 @@ function normalizeEmail(value: string) {
 async function copyEmail() {
   if (!targetEmail.value) return
   try {
-    await navigator.clipboard.writeText(targetEmail.value)
+    await copyToClipboard(targetEmail.value)
     appStore.showSuccess('邮箱已复制')
   } catch {
     appStore.showError('复制邮箱失败')

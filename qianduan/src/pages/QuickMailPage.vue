@@ -5,9 +5,10 @@ import { ArrowLeft, Copy, Eye, EyeOff, Inbox, Mail, Moon, RefreshCw, Search, Sun
 import AppLogo from '../components/AppLogo.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import { receiveQuickMail, type QuickMailMessage } from '../api/quickMail'
-import { authSessionClearedEvent, authSessionClearedStorageKey, clearAuthSession, getAuthToken } from '../api/session'
+import { authSessionClearedEvent, authSessionClearedStorageKey, clearAuthSession, getAuthToken, getAuthUserRole } from '../api/session'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
+import { copyToClipboard } from '../utils/clipboard'
 import { mailContactEmails } from '../utils/mailContacts'
 import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
 
@@ -186,7 +187,7 @@ function applyPublicPageSizeSettings(settings = appStore.cachedPublicSettings.va
 }
 
 function refreshAuthAvailable() {
-  authAvailable.value = Boolean(getAuthToken())
+  authAvailable.value = Boolean(getAuthToken()) && getAuthUserRole() === 'admin'
 }
 
 function handleAuthSessionCleared() {
@@ -304,7 +305,7 @@ async function copyRandomOutlookAlias() {
 
   const aliasEmail = `${localPart}+${suffix}@${domain}`
   try {
-    await navigator.clipboard.writeText(aliasEmail)
+    await copyToClipboard(aliasEmail)
     appStore.showSuccess(`已复制：${aliasEmail}`)
   } catch {
     appStore.showError('复制失败')

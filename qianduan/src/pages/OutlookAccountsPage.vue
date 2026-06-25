@@ -7,6 +7,7 @@ import { useAppStore } from '../stores/app'
 import { useTaskStore } from '../stores/tasks'
 import { getAdminSettings } from '../api/adminSettings'
 import { batchCreateOutlookAccounts, batchOutlookAction, createOutlookAccount, createOutlookDataExportTask, createOutlookDataImportTask, createOutlookGroup, deleteOutlookAccount, deleteOutlookGroup, exchangeOutlookCode, getOutlookAuthorizeURL, getOutlookMessageDetail, getOutlookOAuthResult, listOutlookAccounts, listOutlookGroups, listOutlookMessages, testOutlookAccount, updateOutlookAccount, updateOutlookGroup, type AccountListFilter, type BackgroundTask, type OutlookAccount, type OutlookAccountListResponse, type OutlookGroup, type OutlookMessage } from '../api/outlookAccounts'
+import { copyToClipboard } from '../utils/clipboard'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { normalizeOutlookAccountPageCache, outlookAccountPageCacheKey, outlookManagementCacheKey, rememberOutlookAccountPage, type OutlookAccountPageCacheEntry } from '../utils/outlookManagementCache'
 import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
@@ -381,6 +382,10 @@ watch(filteredAccounts, () => {
   selectedIDs.value = selectedIDs.value.filter((id) => valid.has(id))
 })
 
+watch([sortedAccounts, pageSize, searchQuery], () => {
+  void nextTick(updateOutlookVirtualViewport)
+})
+
 watch(searchQuery, () => {
   if (!accountAutoRefreshEnabled) return
   window.clearTimeout(accountSearchTimer)
@@ -535,8 +540,10 @@ onMounted(() => {
   restoreOutlookManagementCache()
   accountAutoRefreshEnabled = true
   refreshAll()
+  void nextTick(updateOutlookVirtualViewport)
   updateGroupNameScrollMax()
   window.addEventListener('message', handleOAuthMessage)
+  window.addEventListener('resize', updateOutlookVirtualViewport)
   window.addEventListener('resize', updateGroupNameScrollMax)
   document.addEventListener('click', closeFloating)
 })
@@ -545,6 +552,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(accountSearchTimer)
   window.clearInterval(oauthResultPollTimer)
   window.removeEventListener('message', handleOAuthMessage)
+  window.removeEventListener('resize', updateOutlookVirtualViewport)
   window.removeEventListener('resize', updateGroupNameScrollMax)
   document.removeEventListener('click', closeFloating)
 })
@@ -647,6 +655,7 @@ async function loadAccounts() {
       outlookTableAreaRef.value.scrollTop = 0
     }
     outlookVirtualScrollTop.value = 0
+    void nextTick(updateOutlookVirtualViewport)
     saveOutlookManagementCache()
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '获取微软邮箱账号失败')
@@ -1355,7 +1364,7 @@ async function saveRemark() {
 
 async function copyText(value: string, message = '已复制') {
   try {
-    await navigator.clipboard.writeText(value)
+    await copyToClipboard(value)
     appStore.showSuccess(message)
   } catch {
     appStore.showError('复制失败')
@@ -2449,7 +2458,6 @@ function closeFloating(event?: MouseEvent) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  flex: 1 1 0;
 }
 
 .outlook-action-primary,
@@ -2688,14 +2696,14 @@ html.dark .outlook-more-selected-badge {
     var(--outlook-col-actions)
   );
   --outlook-table-divider: rgb(148 163 184 / 0.08);
-  min-height: 0;
+  flex: 1;
+  min-height: 100%;
   min-width: 0;
   width: 100%;
   max-width: 100%;
-  flex: 1;
-  height: 100%;
-  max-height: 100%;
-  overflow: auto;
+  max-height: min(62vh, 720px);
+  overflow-x: auto;
+  overflow-y: auto;
 }
 
 .outlook-virtual-row {

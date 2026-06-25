@@ -25,6 +25,7 @@ import {
   type CardKeyStatus,
   type SaveCardKeyPayload,
 } from '../api/cardKeys'
+import { copyToClipboard } from '../utils/clipboard'
 
 const appStore = useAppStore()
 const queryClient = useQueryClient()
@@ -1435,7 +1436,7 @@ async function unbindSelectedCardKeys() {
 
 async function copyText(value: string, successMessage: string) {
   try {
-    await navigator.clipboard.writeText(value)
+    await copyToClipboard(value)
     appStore.showSuccess(successMessage)
   } catch {
     appStore.showError('复制失败')

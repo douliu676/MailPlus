@@ -8,6 +8,7 @@ import { useTaskStore } from '../stores/tasks'
 import { getAdminSettings } from '../api/adminSettings'
 import { createMailGroup, deleteMailGroup, listMailGroups, updateMailGroup, type MailGroup } from '../api/mailGroups'
 import { batchCreateMailAccounts, batchMailAction, createMailAccount, createMailDataExportTask, createMailDataImportTask, createMailServer, deleteMailAccount, deleteMailServer, listMailAccounts, listMailServers, receiveMailDetail, receiveMailMessages, sendMailAccountMessage, testMailAccount, updateMailAccount, updateMailServer, type AccountListFilter, type BackgroundTask, type MailAccount, type MailAccountListResponse, type MailServer, type ReceivedMailDetail, type ReceivedMailMessage, type SaveMailAccountPayload } from '../api/mailAccounts'
+import { copyToClipboard } from '../utils/clipboard'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { mailAccountPageCacheKey, mailManagementCacheKey, normalizeMailAccountPageCache, rememberMailAccountPage, type MailAccountPageCacheEntry } from '../utils/mailManagementCache'
 import { sanitizeMailHtml } from '../utils/sanitizeMailHtml'
@@ -1342,7 +1343,7 @@ function openMailReceiveModal(item: MailAccount) {
 
 async function copyMailAddress(email: string) {
   try {
-    await navigator.clipboard.writeText(email)
+    await copyToClipboard(email)
     appStore.showSuccess('邮箱已复制')
   } catch {
     appStore.showError('复制失败')
