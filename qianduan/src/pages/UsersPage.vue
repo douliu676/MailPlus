@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import {
   Check,
@@ -56,6 +56,7 @@ const tableSettingsLoaded = ref(false)
 const pageSizeStorageKey = 'admin_users_page_size'
 const usersManagementCacheKey = 'admin_users_management_cache_v1'
 const usersCacheRestored = ref(false)
+const usersTableWrapperRef = ref<HTMLElement | null>(null)
 
 function readStoredUserID() {
   const raw = getSessionItem('auth_user')
@@ -216,8 +217,24 @@ function saveUsersManagementCache() {
 }
 
 let userRequestID = 0
+let usersAutoRefreshEnabled = false
+let searchTimer: number | undefined
+let userPageBeforeSearch = 1
+let userScrollTopBeforeSearch = 0
 
-async function loadUsers(options: { showTableLoading?: boolean } = {}) {
+function currentUsersTableScrollTop() {
+  return usersTableWrapperRef.value?.scrollTop ?? 0
+}
+
+async function restoreUsersTableScroll(scrollTop: number) {
+  await nextTick()
+  const wrapper = usersTableWrapperRef.value
+  if (!wrapper) return
+  const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight)
+  wrapper.scrollTop = Math.min(scrollTop, maxScrollTop)
+}
+
+async function loadUsers(options: { showTableLoading?: boolean; restoreScrollTop?: number } = {}) {
   if (!pagination.page_size) return
   const requestID = ++userRequestID
   const showTableLoading = options.showTableLoading ?? (!usersCacheRestored.value && users.value.length === 0)
@@ -254,6 +271,9 @@ async function loadUsers(options: { showTableLoading?: boolean } = {}) {
       return
     }
     applyUserListResponse(response)
+    if (options.restoreScrollTop !== undefined) {
+      await restoreUsersTableScroll(options.restoreScrollTop)
+    }
     usersCacheRestored.value = true
     if (usersCacheRestored.value) {
       saveUsersManagementCache()
@@ -296,14 +316,25 @@ async function loadTableSettings() {
   }
 }
 
-let searchTimer: number | undefined
-function handleSearch() {
+watch(searchQuery, (value, oldValue) => {
+  if (!usersAutoRefreshEnabled) return
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    userPageBeforeSearch = pagination.page
+    userScrollTopBeforeSearch = currentUsersTableScrollTop()
+  }
   window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => {
+    if (!nextSearch && previousSearch) {
+      pagination.page = userPageBeforeSearch
+      void loadUsers({ restoreScrollTop: userScrollTopBeforeSearch })
+      return
+    }
     pagination.page = 1
-    loadUsers()
+    void loadUsers()
   }, 300)
-}
+})
 
 function setSort(key: SortKey) {
   if (sortState.key === key) {
@@ -532,6 +563,7 @@ onMounted(async () => {
   if (usersCacheRestored.value) {
     saveUsersManagementCache()
   }
+  usersAutoRefreshEnabled = true
   await loadUsers()
   document.addEventListener('click', closeMenus)
 })
@@ -553,9 +585,8 @@ onBeforeUnmount(() => {
             class="input search-clear-input h-9 pl-10 text-sm"
             type="text"
             placeholder="邮箱/用户名"
-            @input="handleSearch"
           />
-          <button v-if="searchQuery" class="search-clear-button" type="button" title="清空搜索" aria-label="清空搜索" @click="searchQuery = ''; handleSearch()">
+          <button v-if="searchQuery" class="search-clear-button" type="button" title="清空搜索" aria-label="清空搜索" @click="searchQuery = ''">
             <X class="h-3.5 w-3.5" />
           </button>
         </div>
@@ -568,7 +599,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="table-wrapper users-table-wrapper">
+      <div ref="usersTableWrapperRef" class="table-wrapper users-table-wrapper">
         <table class="w-full min-w-max divide-y divide-gray-200 text-sm dark:divide-dark-700">
           <thead class="table-header bg-gray-50 text-left text-xs text-gray-500 dark:bg-dark-800 dark:text-dark-400">
             <tr>

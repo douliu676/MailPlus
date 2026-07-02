@@ -148,6 +148,10 @@ function readPersistedMailSort() {
 const persistedMailSort = readPersistedMailSort()
 const mailSortKey = ref<MailSortKey>(persistedMailSort.key)
 const mailSortOrder = ref<'asc' | 'desc'>(persistedMailSort.order)
+type AccountLoadOptions = {
+  resetScroll?: boolean
+  restoreScrollTop?: number
+}
 const mailMenuX = ref(0)
 const mailMenuY = ref(0)
 const receiveModalOpen = ref(false)
@@ -185,6 +189,7 @@ let lastGroupClickAt = 0
 let lastGroupClickID = 0
 let receiveDetailRequestID = 0
 let receiveWarmupRunID = 0
+let receivePageBeforeSearch = 1
 
 const fallbackGroups: MailGroup[] = [
   { id: 1, parent_id: 0, name: '全部邮箱', system: true, sort_order: 0, count: 0, created_at: '' },
@@ -441,17 +446,46 @@ watch([sortedAccounts, pageSize, searchQuery], () => {
   updateMailColumnDividers()
 })
 
-watch(searchQuery, () => {
+watch(searchQuery, (value, oldValue) => {
   if (!accountAutoRefreshEnabled) return
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    accountPageBeforeSearch = accountPage.value
+    accountScrollTopBeforeSearch = mailTableAreaRef.value?.scrollTop ?? mailVirtualScrollTop.value
+  }
   window.clearTimeout(accountSearchTimer)
   accountSearchTimer = window.setTimeout(() => {
+    if (!nextSearch && previousSearch) {
+      accountPage.value = accountPageBeforeSearch
+      loadAccounts({ resetScroll: false, restoreScrollTop: accountScrollTopBeforeSearch })
+      return
+    }
     accountPage.value = 1
     loadAccounts()
   }, 300)
 })
 
-watch([receiveFolder, receivePageSize, receiveSearchQuery], () => {
+watch([receiveFolder, receivePageSize], () => {
   receivePage.value = 1
+  if (receiveSearchQuery.value.trim()) {
+    receivePageBeforeSearch = 1
+  }
+})
+
+watch(receiveSearchQuery, (value, oldValue) => {
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    receivePageBeforeSearch = receivePage.value
+  }
+  if (!nextSearch && previousSearch) {
+    receivePage.value = receivePageBeforeSearch
+    return
+  }
+  if (nextSearch) {
+    receivePage.value = 1
+  }
 })
 
 watch(receiveTotalPages, (pages) => {
@@ -610,6 +644,8 @@ async function loadServers() {
 
 let accountRequestID = 0
 let accountSearchTimer: number | undefined
+let accountPageBeforeSearch = 1
+let accountScrollTopBeforeSearch = 0
 
 function accountListGroupID() {
   return currentGroup.value?.id && currentGroup.value.id !== 1 ? currentGroup.value.id : undefined
@@ -625,8 +661,24 @@ const mailAccountQueryKey = computed(() => [
   mailSortOrder.value,
 ])
 
-async function loadAccounts() {
+async function restoreMailTableScroll(scrollTop: number) {
+  await nextTick()
+  const area = mailTableAreaRef.value
+  if (!area) {
+    mailVirtualScrollTop.value = scrollTop
+    return
+  }
+  const maxScrollTop = Math.max(0, area.scrollHeight - area.clientHeight)
+  const nextScrollTop = Math.min(scrollTop, maxScrollTop)
+  area.scrollTop = nextScrollTop
+  mailVirtualScrollTop.value = nextScrollTop
+  await updateMailColumnDividers()
+}
+
+async function loadAccounts(options: AccountLoadOptions = {}) {
   const requestID = ++accountRequestID
+  const resetScroll = options.resetScroll ?? true
+  const currentScrollTop = resetScroll ? 0 : options.restoreScrollTop ?? mailTableAreaRef.value?.scrollTop ?? mailVirtualScrollTop.value
   try {
     const queryKey = mailAccountQueryKey.value
     const params = {
@@ -653,7 +705,7 @@ async function loadAccounts() {
     if (requestID !== accountRequestID) return
     if (response.items.length === 0 && response.total > 0 && response.pages > 0 && accountPage.value > response.pages) {
       accountPage.value = response.pages
-      loadAccounts()
+      loadAccounts(options)
       return
     }
     accounts.value = response.items
@@ -662,10 +714,15 @@ async function loadAccounts() {
     accountPage.value = response.page
     const accountIDs = new Set(accounts.value.map((item) => item.id))
     selectedMailIDs.value = selectedMailIDs.value.filter((id) => accountIDs.has(id))
-    if (mailTableAreaRef.value) {
-      mailTableAreaRef.value.scrollTop = 0
+    if (resetScroll) {
+      if (mailTableAreaRef.value) {
+        mailTableAreaRef.value.scrollTop = 0
+      }
+      mailVirtualScrollTop.value = 0
+      await updateMailColumnDividers()
+    } else {
+      await restoreMailTableScroll(currentScrollTop)
     }
-    mailVirtualScrollTop.value = 0
     saveMailManagementCache()
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '获取邮箱账号失败')
@@ -732,7 +789,7 @@ function applyMailAccountDelete(id: number) {
 }
 
 function syncMailAccountsQuietly(refreshGroups = true) {
-  void loadAccounts()
+  void loadAccounts({ resetScroll: false })
   if (refreshGroups) {
     void loadGroups()
   }
@@ -1193,7 +1250,7 @@ async function removeSelectedMailAccounts() {
     }
   }
   selectedMailIDs.value = []
-  await loadAccounts()
+  await loadAccounts({ resetScroll: false })
   await loadGroups()
   if (successCount === deletingItems.length) {
     appStore.showSuccess(`已删除 ${successCount} 个邮箱`)
@@ -1231,7 +1288,7 @@ async function testSelectedMailAccounts() {
   } else {
     appStore.showError('邮箱连接测试失败')
   }
-  await loadAccounts()
+  await loadAccounts({ resetScroll: false })
 }
 
 async function removeSelectedMailAccountsV2() {
@@ -1322,6 +1379,7 @@ function clearReceiveSessionState() {
   receiveModalOpen.value = false
   receiveTarget.value = null
   receiveFolder.value = 'inbox'
+  receivePageBeforeSearch = 1
   receiveSearchQuery.value = ''
   receiveLoading.value = false
   receiveDetailLoading.value = false
@@ -1348,6 +1406,7 @@ function openMailReceiveModal(item: MailAccount) {
   receiveWarmupRunID += 1
   receiveTarget.value = item
   receiveLimit.value = 5
+  receivePageBeforeSearch = 1
   receiveSearchQuery.value = ''
   receivePage.value = 1
   receiveDetailLoading.value = false
@@ -1389,6 +1448,7 @@ async function fetchReceiveMessages() {
       trash: receiveMessages.trash,
     }
     receiveFolder.value = 'inbox'
+    receivePageBeforeSearch = 1
     receiveSearchQuery.value = ''
     receivePage.value = 1
     saveReceiveCache(receiveTarget.value.id)
@@ -1491,7 +1551,7 @@ async function saveBatchMailAccounts() {
     const created = await batchCreateMailAccounts({ ...batchForm })
     appStore.showSuccess(`已添加 ${created.length} 个邮箱`)
     showBatchMailModal.value = false
-    await loadAccounts()
+    await loadAccounts({ resetScroll: false })
     await loadGroups()
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '批量添加失败')

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, CircleOff, Download, Globe2, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Search, Trash2, Upload, X, XCircle } from 'lucide-vue-next'
 import PaginationBar from '../components/PaginationBar.vue'
@@ -62,6 +62,9 @@ let settingsSaveQueued = false
 let proxyAutoRefreshEnabled = false
 let proxySearchTimer: number | undefined
 let nodeRequestID = 0
+let proxyPageBeforeSearch = 1
+let proxyScrollTopBeforeSearch = 0
+let pendingProxyScrollRestore: number | undefined
 
 type PaginationItem = { key: string; type: 'page'; page: number } | { key: string; type: 'ellipsis' }
 type ProxyNodeSortKey = NonNullable<ProxyNodeListParams['sort_by']>
@@ -355,6 +358,18 @@ function scrollProxyTableToTop() {
   }
 }
 
+function currentProxyTableScrollTop() {
+  return proxyTableWrapRef.value?.scrollTop ?? 0
+}
+
+async function restoreProxyTableScroll(scrollTop: number) {
+  await nextTick()
+  const wrapper = proxyTableWrapRef.value
+  if (!wrapper) return
+  const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight)
+  wrapper.scrollTop = Math.min(scrollTop, maxScrollTop)
+}
+
 function isXrayNode(node: Pick<ProxyNode, 'protocol'> | null | undefined) {
   return node?.protocol === 'vmess' || node?.protocol === 'vless'
 }
@@ -407,13 +422,30 @@ function requestProxyNodes(resetPage = false) {
   void loadNodes()
 }
 
-watch(searchQuery, () => {
+watch(searchQuery, (value, oldValue) => {
   if (!proxyAutoRefreshEnabled) {
     saveProxySystemCache()
     return
   }
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    proxyPageBeforeSearch = currentPage.value
+    proxyScrollTopBeforeSearch = currentProxyTableScrollTop()
+  }
   window.clearTimeout(proxySearchTimer)
-  proxySearchTimer = window.setTimeout(() => requestProxyNodes(true), 300)
+  proxySearchTimer = window.setTimeout(() => {
+    if (!nextSearch && previousSearch) {
+      pendingProxyScrollRestore = proxyScrollTopBeforeSearch
+      if (currentPage.value !== proxyPageBeforeSearch) {
+        currentPage.value = proxyPageBeforeSearch
+        return
+      }
+      void loadNodes({ restoreScrollTop: proxyScrollTopBeforeSearch })
+      return
+    }
+    requestProxyNodes(true)
+  }, 300)
 })
 
 watch(pageSize, () => {
@@ -451,7 +483,7 @@ async function refreshAll() {
   }
 }
 
-async function loadNodes() {
+async function loadNodes(options: { restoreScrollTop?: number } = {}) {
   const requestID = ++nodeRequestID
   const queryKey = proxyNodeQueryKey.value
   const cached = queryClient.getQueryData<ProxyNodeListResponse>(queryKey)
@@ -471,6 +503,11 @@ async function loadNodes() {
     return
   }
   applyProxyNodeListResponse(response)
+  const restoreScrollTop = options.restoreScrollTop ?? pendingProxyScrollRestore
+  pendingProxyScrollRestore = undefined
+  if (restoreScrollTop !== undefined) {
+    await restoreProxyTableScroll(restoreScrollTop)
+  }
   saveProxySystemCache()
 }
 

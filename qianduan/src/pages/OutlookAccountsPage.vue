@@ -110,6 +110,8 @@ const loading = ref(false)
 let accountAutoRefreshEnabled = false
 let accountRequestID = 0
 let accountSearchTimer: number | undefined
+let accountPageBeforeSearch = 1
+let accountScrollTopBeforeSearch = 0
 const groupMenuOpen = ref(false)
 const groupMenuX = ref(0)
 const groupMenuY = ref(0)
@@ -173,6 +175,7 @@ let oauthResultPollTimer: number | undefined
 let oauthResultFilled = false
 let readDetailRequestID = 0
 let readWarmupRunID = 0
+let readPageBeforeSearch = 1
 const exchangedOutlookCodes = new Set<string>()
 
 const accountForm = reactive({
@@ -283,6 +286,10 @@ function readPersistedOutlookSort() {
 const persistedOutlookSort = readPersistedOutlookSort()
 const outlookSortKey = ref<OutlookSortKey>(persistedOutlookSort.key)
 const outlookSortOrder = ref<'asc' | 'desc'>(persistedOutlookSort.order)
+type AccountLoadOptions = {
+  resetScroll?: boolean
+  restoreScrollTop?: number
+}
 const sortedAccounts = computed(() => {
   return filteredAccounts.value
 })
@@ -384,10 +391,21 @@ watch([sortedAccounts, pageSize, searchQuery], () => {
   void nextTick(updateOutlookVirtualViewport)
 })
 
-watch(searchQuery, () => {
+watch(searchQuery, (value, oldValue) => {
   if (!accountAutoRefreshEnabled) return
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    accountPageBeforeSearch = accountPage.value
+    accountScrollTopBeforeSearch = outlookTableAreaRef.value?.scrollTop ?? outlookVirtualScrollTop.value
+  }
   window.clearTimeout(accountSearchTimer)
   accountSearchTimer = window.setTimeout(() => {
+    if (!nextSearch && previousSearch) {
+      accountPage.value = accountPageBeforeSearch
+      loadAccounts({ resetScroll: false, restoreScrollTop: accountScrollTopBeforeSearch })
+      return
+    }
     accountPage.value = 1
     loadAccounts()
   }, 300)
@@ -411,8 +429,26 @@ watch(visibleGroups, () => {
   void updateGroupNameScrollMax()
 }, { flush: 'post' })
 
-watch([readFolder, readPageSize, readSearchQuery], () => {
+watch([readFolder, readPageSize], () => {
   readPage.value = 1
+  if (readSearchQuery.value.trim()) {
+    readPageBeforeSearch = 1
+  }
+})
+
+watch(readSearchQuery, (value, oldValue) => {
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    readPageBeforeSearch = readPage.value
+  }
+  if (!nextSearch && previousSearch) {
+    readPage.value = readPageBeforeSearch
+    return
+  }
+  if (nextSearch) {
+    readPage.value = 1
+  }
 })
 
 watch(readTotalPages, (pages) => {
@@ -608,8 +644,24 @@ async function loadGroups() {
   }
 }
 
-async function loadAccounts() {
+async function restoreOutlookTableScroll(scrollTop: number) {
+  await nextTick()
+  const area = outlookTableAreaRef.value
+  if (!area) {
+    outlookVirtualScrollTop.value = scrollTop
+    return
+  }
+  const maxScrollTop = Math.max(0, area.scrollHeight - area.clientHeight)
+  const nextScrollTop = Math.min(scrollTop, maxScrollTop)
+  area.scrollTop = nextScrollTop
+  outlookVirtualScrollTop.value = nextScrollTop
+  updateOutlookVirtualViewport()
+}
+
+async function loadAccounts(options: AccountLoadOptions = {}) {
   const requestID = ++accountRequestID
+  const resetScroll = options.resetScroll ?? true
+  const currentScrollTop = resetScroll ? 0 : options.restoreScrollTop ?? outlookTableAreaRef.value?.scrollTop ?? outlookVirtualScrollTop.value
   try {
     const queryKey = [
       'outlook-accounts',
@@ -644,18 +696,22 @@ async function loadAccounts() {
     if (requestID !== accountRequestID) return
     if (response.items.length === 0 && response.total > 0 && response.pages > 0 && accountPage.value > response.pages) {
       accountPage.value = response.pages
-      loadAccounts()
+      loadAccounts(options)
       return
     }
     accounts.value = response.items
     accountTotal.value = response.total
     accountPages.value = response.pages
     accountPage.value = response.page
-    if (outlookTableAreaRef.value) {
-      outlookTableAreaRef.value.scrollTop = 0
+    if (resetScroll) {
+      if (outlookTableAreaRef.value) {
+        outlookTableAreaRef.value.scrollTop = 0
+      }
+      outlookVirtualScrollTop.value = 0
+      void nextTick(updateOutlookVirtualViewport)
+    } else {
+      await restoreOutlookTableScroll(currentScrollTop)
     }
-    outlookVirtualScrollTop.value = 0
-    void nextTick(updateOutlookVirtualViewport)
     saveOutlookManagementCache()
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '获取微软邮箱账号失败')
@@ -740,7 +796,7 @@ function applyOutlookAccountDelete(id: number) {
 }
 
 function syncOutlookAccountsQuietly(refreshGroups = true) {
-  void loadAccounts()
+  void loadAccounts({ resetScroll: false })
   if (refreshGroups) {
     void loadGroups()
   }
@@ -1141,7 +1197,7 @@ async function saveBatch() {
     await batchCreateOutlookAccounts({ content: batchForm.content, group_id: batchForm.group_id })
     batchModalOpen.value = false
     batchForm.content = ''
-    await Promise.all([loadGroups(), loadAccounts()])
+    await Promise.all([loadGroups(), loadAccounts({ resetScroll: false })])
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '批量导入失败')
   }
@@ -1272,10 +1328,10 @@ async function runTest(item: OutlookAccount) {
   try {
     const result = await testOutlookAccount(item.id)
     appStore.showSuccess(result.message || 'Graph API 连接正常')
-    await loadAccounts()
+    await loadAccounts({ resetScroll: false })
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : 'Graph API 连接失败')
-    await loadAccounts()
+    await loadAccounts({ resetScroll: false })
   }
 }
 
@@ -1289,7 +1345,7 @@ async function testSelected() {
     }
   }
   appStore.showSuccess(`已测试 ${selectedAccounts.value.length} 个微软邮箱`)
-  await loadAccounts()
+  await loadAccounts({ resetScroll: false })
 }
 
 async function removeSelectedV2() {
@@ -1524,6 +1580,7 @@ function clearReadSessionState() {
   readModalOpen.value = false
   readTarget.value = null
   readFolder.value = 'inbox'
+  readPageBeforeSearch = 1
   readSearchQuery.value = ''
   readLoading.value = false
   readDetailLoading.value = false
@@ -1548,6 +1605,7 @@ function openReadModal(item: OutlookAccount) {
   readDetailRequestID += 1
   readWarmupRunID += 1
   readTarget.value = item
+  readPageBeforeSearch = 1
   readSearchQuery.value = ''
   readLimit.value = 5
   readPage.value = 1
@@ -1636,6 +1694,7 @@ async function fetchMessages() {
       junkemail: readMessages.junkemail,
     }
     readFolder.value = 'inbox'
+    readPageBeforeSearch = 1
     readSearchQuery.value = ''
     readPage.value = 1
     saveReadCache(accountID)

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RefreshCw, Search, Trash2, X } from 'lucide-vue-next'
 import PaginationBar from '../components/PaginationBar.vue'
 import { getAdminSettings, updateAdminSettings } from '../api/adminSettings'
@@ -41,10 +41,14 @@ const refreshing = ref(false)
 const clearing = ref(false)
 const cleanupSaving = ref(false)
 const logsCacheRestored = ref(false)
+const logsTableShellRef = ref<HTMLElement | null>(null)
 let searchTimer: number | undefined
 let cleanupSaveTimer: number | undefined
 let requestID = 0
 let mountedReady = false
+let logsPageBeforeSearch = 1
+let logsScrollTopBeforeSearch = 0
+let pendingLogsScrollRestore: number | undefined
 
 function normalizePageSize(value: unknown, fallback = fallbackTablePageSize) {
   const size = Math.floor(Number(value))
@@ -171,7 +175,19 @@ function saveCardKeyLogsCache() {
   }
 }
 
-async function loadLogs() {
+function currentLogsTableScrollTop() {
+  return logsTableShellRef.value?.scrollTop ?? 0
+}
+
+async function restoreLogsTableScroll(scrollTop: number) {
+  await nextTick()
+  const shell = logsTableShellRef.value
+  if (!shell) return
+  const maxScrollTop = Math.max(0, shell.scrollHeight - shell.clientHeight)
+  shell.scrollTop = Math.min(scrollTop, maxScrollTop)
+}
+
+async function loadLogs(options: { restoreScrollTop?: number } = {}) {
   const id = ++requestID
   loading.value = true
   try {
@@ -186,7 +202,13 @@ async function loadLogs() {
       return
     }
     applyCardKeyUseLogListResponse(response)
+    const restoreScrollTop = options.restoreScrollTop ?? pendingLogsScrollRestore
+    pendingLogsScrollRestore = undefined
+    if (restoreScrollTop !== undefined) {
+      await restoreLogsTableScroll(restoreScrollTop)
+    }
   } catch (error) {
+    pendingLogsScrollRestore = undefined
     if (id === requestID) {
       appStore.showError(error instanceof Error ? error.message : '读取卡密日志失败')
     }
@@ -205,15 +227,33 @@ async function refreshLogs() {
   }
 }
 
-function queueSearch() {
+function loadLogsAtPage(nextPage: number, restoreScrollTop?: number) {
+  const validPage = Math.max(1, Math.floor(Number(nextPage) || 1))
+  if (restoreScrollTop !== undefined) {
+    pendingLogsScrollRestore = restoreScrollTop
+  }
+  if (page.value !== validPage) {
+    page.value = validPage
+    return
+  }
+  void loadLogs({ restoreScrollTop })
+}
+
+function queueSearch(value: string, oldValue: string) {
   if (!mountedReady) return
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    logsPageBeforeSearch = page.value
+    logsScrollTopBeforeSearch = currentLogsTableScrollTop()
+  }
   window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => {
-    if (page.value !== 1) {
-      page.value = 1
-    } else {
-      void loadLogs()
+    if (!nextSearch && previousSearch) {
+      loadLogsAtPage(logsPageBeforeSearch, logsScrollTopBeforeSearch)
+      return
     }
+    loadLogsAtPage(1, 0)
   }, 300)
 }
 
@@ -347,7 +387,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="card-key-use-logs-table-shell relative flex-1 overflow-x-auto overflow-y-auto bg-white dark:bg-dark-900">
+      <div ref="logsTableShellRef" class="card-key-use-logs-table-shell relative flex-1 overflow-x-auto overflow-y-auto bg-white dark:bg-dark-900">
         <table class="card-key-use-logs-table">
           <thead>
             <tr>

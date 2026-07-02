@@ -129,11 +129,18 @@ const bulkEmailSelections = ref<SelectedEmailAccount[]>([])
 const emailPickerGroupNameScrollX = ref(0)
 const emailPickerGroupNameScrollMax = ref(0)
 const emailPickerGroupListRef = ref<HTMLElement | null>(null)
+const cardKeyTableWrapRef = ref<HTMLElement | null>(null)
+const emailPickerTableWrapRef = ref<HTMLElement | null>(null)
 let searchTimer: number | undefined
 let emailPickerSearchTimer: number | undefined
 let cardKeyRequestID = 0
 let emailPickerRequestID = 0
 let cardKeyAutoRefreshEnabled = false
+let cardKeyPageBeforeSearch = 1
+let cardKeyScrollTopBeforeSearch = 0
+let pendingCardKeyScrollRestore: number | undefined
+let emailPickerPageBeforeSearch = 1
+let emailPickerScrollTopBeforeSearch = 0
 
 const form = reactive({
   group_id: 0,
@@ -257,6 +264,42 @@ function applyPublicPageSizeSettings(settings = appStore.cachedPublicSettings.va
   }
 }
 
+function currentCardKeyTableScrollTop() {
+  return cardKeyTableWrapRef.value?.scrollTop ?? 0
+}
+
+async function restoreCardKeyTableScroll(scrollTop: number) {
+  await nextTick()
+  const wrapper = cardKeyTableWrapRef.value
+  if (!wrapper) return
+  const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight)
+  wrapper.scrollTop = Math.min(scrollTop, maxScrollTop)
+}
+
+function currentEmailPickerTableScrollTop() {
+  return emailPickerTableWrapRef.value?.scrollTop ?? 0
+}
+
+async function restoreEmailPickerTableScroll(scrollTop: number) {
+  await nextTick()
+  const wrapper = emailPickerTableWrapRef.value
+  if (!wrapper) return
+  const maxScrollTop = Math.max(0, wrapper.scrollHeight - wrapper.clientHeight)
+  wrapper.scrollTop = Math.min(scrollTop, maxScrollTop)
+}
+
+function scrollCardKeyTableToTop() {
+  if (cardKeyTableWrapRef.value) {
+    cardKeyTableWrapRef.value.scrollTop = 0
+  }
+}
+
+function scrollEmailPickerTableToTop() {
+  if (emailPickerTableWrapRef.value) {
+    emailPickerTableWrapRef.value.scrollTop = 0
+  }
+}
+
 onMounted(async () => {
   applyPublicPageSizeSettings()
   restoreCardKeyManagementCache()
@@ -305,19 +348,42 @@ watch(showEmailPicker, (visible) => {
   }
 }, { flush: 'post' })
 
-watch(searchQuery, () => {
+watch(searchQuery, (value, oldValue) => {
   if (!cardKeyAutoRefreshEnabled) return
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    cardKeyPageBeforeSearch = currentPage.value
+    cardKeyScrollTopBeforeSearch = currentCardKeyTableScrollTop()
+  }
   window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => {
+    if (!nextSearch && previousSearch) {
+      loadCardKeysAtPage(cardKeyPageBeforeSearch, cardKeyScrollTopBeforeSearch)
+      return
+    }
+    scrollCardKeyTableToTop()
     resetToFirstPageOrLoad()
   }, 300)
 })
 
-watch(emailPickerSearch, () => {
+watch(emailPickerSearch, (value, oldValue) => {
   if (!showEmailPicker.value) return
+  const nextSearch = value.trim()
+  const previousSearch = oldValue.trim()
+  if (nextSearch && !previousSearch) {
+    emailPickerPageBeforeSearch = emailPickerPage.value
+    emailPickerScrollTopBeforeSearch = currentEmailPickerTableScrollTop()
+  }
   window.clearTimeout(emailPickerSearchTimer)
   emailPickerSearchTimer = window.setTimeout(() => {
+    if (!nextSearch && previousSearch) {
+      emailPickerPage.value = emailPickerPageBeforeSearch
+      void loadEmailPickerAccounts({ restoreScrollTop: emailPickerScrollTopBeforeSearch })
+      return
+    }
     emailPickerPage.value = 1
+    scrollEmailPickerTableToTop()
     void loadEmailPickerAccounts()
   }, 300)
 })
@@ -737,7 +803,7 @@ function currentListParams(): CardKeyListParams {
   }
 }
 
-async function loadCardKeys() {
+async function loadCardKeys(options: { restoreScrollTop?: number } = {}) {
   if (!activeGroupID.value) {
     clearCardKeyList()
     return
@@ -762,7 +828,13 @@ async function loadCardKeys() {
       return
     }
     applyCardKeyListResponse(response)
+    const restoreScrollTop = options.restoreScrollTop ?? pendingCardKeyScrollRestore
+    pendingCardKeyScrollRestore = undefined
+    if (restoreScrollTop !== undefined) {
+      await restoreCardKeyTableScroll(restoreScrollTop)
+    }
   } catch (error) {
+    pendingCardKeyScrollRestore = undefined
     appStore.showError(error instanceof Error ? error.message : '读取卡密失败')
   } finally {
     loading.value = false
@@ -783,6 +855,18 @@ function resetToFirstPageOrLoad() {
     return
   }
   void loadCardKeys()
+}
+
+function loadCardKeysAtPage(page: number, restoreScrollTop?: number) {
+  const nextPage = Math.max(1, Math.floor(Number(page) || 1))
+  if (restoreScrollTop !== undefined) {
+    pendingCardKeyScrollRestore = restoreScrollTop
+  }
+  if (currentPage.value !== nextPage) {
+    currentPage.value = nextPage
+    return
+  }
+  void loadCardKeys({ restoreScrollTop })
 }
 
 function selectGroup(group: CardKeyGroup) {
@@ -1055,9 +1139,12 @@ async function openEmailPicker(mode: EmailPickerMode = 'edit') {
   emailPickerSource.value = readPersistedEmailPickerSource()
   emailPickerExpandedGroupIDs.value = readPersistedEmailPickerExpandedGroupIDs(emailPickerSource.value)
   emailPickerActiveGroupID.value = readPersistedEmailPickerActiveGroupID(emailPickerSource.value)
-  showEmailPicker.value = true
+  window.clearTimeout(emailPickerSearchTimer)
   emailPickerSearch.value = ''
   emailPickerPage.value = 1
+  emailPickerPageBeforeSearch = 1
+  emailPickerScrollTopBeforeSearch = 0
+  showEmailPicker.value = true
   const restored = restoreEmailPickerFromAvailableCache()
   if (!restored || emailPickerGroups.value.length === 0) {
     await loadEmailPickerGroups()
@@ -1117,7 +1204,7 @@ async function loadEmailPickerGroups(silent = false) {
   }
 }
 
-async function loadEmailPickerAccounts() {
+async function loadEmailPickerAccounts(options: { restoreScrollTop?: number } = {}) {
   const requestID = ++emailPickerRequestID
   const source = emailPickerSource.value
   const params = emailPickerListParams()
@@ -1147,10 +1234,13 @@ async function loadEmailPickerAccounts() {
     if (requestID !== emailPickerRequestID) return
     if (response.items.length === 0 && response.total > 0 && response.pages > 0 && emailPickerPage.value > response.pages) {
       emailPickerPage.value = response.pages
-      await loadEmailPickerAccounts()
+      await loadEmailPickerAccounts(options)
       return
     }
     applyEmailPickerAccountsResponse(response)
+    if (options.restoreScrollTop !== undefined) {
+      await restoreEmailPickerTableScroll(options.restoreScrollTop)
+    }
     rememberEmailPickerAvailablePage(source, response, params)
   } catch (error) {
     if (requestID === emailPickerRequestID && !hadCached) {
@@ -1749,7 +1839,7 @@ function handleDocumentClick(event: MouseEvent) {
       </div>
 
       <div class="mail-account-body flex-1">
-        <div class="mail-table-area card-key-table-wrap relative overflow-x-auto">
+        <div ref="cardKeyTableWrapRef" class="mail-table-area card-key-table-wrap relative overflow-x-auto">
           <table class="mail-account-table card-key-table text-sm">
             <colgroup>
               <col class="card-key-col-select" />
@@ -2096,7 +2186,7 @@ function handleDocumentClick(event: MouseEvent) {
                   <X class="h-3.5 w-3.5" />
                 </button>
               </div>
-              <div class="card-key-email-picker-table-wrap">
+              <div ref="emailPickerTableWrapRef" class="card-key-email-picker-table-wrap">
                 <table class="card-key-email-picker-table" :class="{ 'card-key-email-picker-table-batch': isBatchEmailPicker }">
                   <colgroup>
                     <col v-if="isBatchEmailPicker" class="card-key-email-picker-col-select" />

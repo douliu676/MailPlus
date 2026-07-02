@@ -95,6 +95,7 @@ const messages = ref<QuickMailMessage[]>([])
 const mailPage = ref(1)
 const mailPageSize = ref(readStoredPageSize(initialMode))
 const searchQuery = ref('')
+let mailPageBeforeSearch = 1
 const outlookAliasDomains = new Set(['outlook.com', 'hotmail.com'])
 const randomAliasChars = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
@@ -221,12 +222,29 @@ watch(mode, (currentMode) => {
   lastQueryEmail.value = ''
   submitted.value = false
   messages.value = []
+  mailPageBeforeSearch = 1
   searchQuery.value = ''
   mailPage.value = 1
 })
 
-watch([activeFolder, mailPageSize, normalizedSearchQuery], () => {
+watch([activeFolder, mailPageSize], () => {
   mailPage.value = 1
+  if (normalizedSearchQuery.value) {
+    mailPageBeforeSearch = 1
+  }
+})
+
+watch(normalizedSearchQuery, (value, oldValue) => {
+  if (value && !oldValue) {
+    mailPageBeforeSearch = mailPage.value
+  }
+  if (!value && oldValue) {
+    mailPage.value = mailPageBeforeSearch
+    return
+  }
+  if (value) {
+    mailPage.value = 1
+  }
 })
 
 watch(mailTotalPages, (pages) => {
@@ -267,6 +285,7 @@ async function handleFetch() {
       body: message.body || message.body_preview || '',
       html: message.html || '',
     }))
+    mailPageBeforeSearch = 1
     mailPage.value = 1
     appStore.showSuccess('收取完成')
   } catch (error) {
