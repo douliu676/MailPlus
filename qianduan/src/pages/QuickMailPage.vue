@@ -5,7 +5,8 @@ import { ArrowLeft, Copy, Eye, EyeOff, Inbox, Mail, Moon, RefreshCw, Search, Sun
 import AppLogo from '../components/AppLogo.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import SafeMailFrame from '../components/SafeMailFrame.vue'
-import { receiveQuickMail, type QuickMailMessage } from '../api/quickMail'
+import { receiveQuickMail, receiveQuickMailDetail, type QuickMailMessage } from '../api/quickMail'
+import { useQuickMailReader } from '../composables/useQuickMailReader'
 import { authSessionClearedEvent, authSessionClearedStorageKey, clearAuthSession, getAuthToken, getAuthUserRole } from '../api/session'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
@@ -87,11 +88,9 @@ const form = reactive({
 
 const activeFolder = ref<FolderKey>('inbox')
 const submitted = ref(false)
-const fetching = ref(false)
 const keyVisible = ref(false)
-const selectedMessage = ref<QuickMailMessage | null>(null)
-const lastQueryEmail = ref('')
-const messages = ref<QuickMailMessage[]>([])
+const reader = useQuickMailReader({ receive: receiveQuickMail, detail: receiveQuickMailDetail })
+const { fetching, selectedMessage, lastQueryEmail, messages, detailLoading, detailError } = reader
 const mailPage = ref(1)
 const mailPageSize = ref(readStoredPageSize(initialMode))
 const searchQuery = ref('')
@@ -181,8 +180,10 @@ function refreshAuthAvailable() {
 }
 
 function handleAuthSessionCleared() {
+  const wasAuthenticated = authAvailable.value
   clearAuthSession(false)
   authAvailable.value = false
+  if (wasAuthenticated) reader.reset()
 }
 
 function handleAuthStorage(event: StorageEvent) {
@@ -207,6 +208,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  reader.reset()
   window.removeEventListener('storage', handleAuthStorage)
   window.removeEventListener(authSessionClearedEvent, handleAuthSessionCleared)
 })
@@ -216,6 +218,7 @@ watch(pageTitle, (title) => {
 }, { immediate: true })
 
 watch(mode, (currentMode) => {
+  reader.reset()
   applyStoredQuickMailSettings(currentMode)
   activeFolder.value = 'inbox'
   selectedMessage.value = null
@@ -224,6 +227,12 @@ watch(mode, (currentMode) => {
   messages.value = []
   mailPageBeforeSearch = 1
   searchQuery.value = ''
+  mailPage.value = 1
+})
+
+watch([normalizedEmail, normalizedAdminKey], () => {
+  reader.reset()
+  mailPageBeforeSearch = 1
   mailPage.value = 1
 })
 
@@ -269,29 +278,20 @@ async function handleFetch() {
     return
   }
 
-  fetching.value = true
-  selectedMessage.value = null
   try {
-    const result = await receiveQuickMail(mode.value, {
+    const result = await reader.receive({
+      mode: mode.value,
       email: normalizedEmail.value,
       limit: normalizedLimit.value,
       admin_key: normalizedAdminKey.value,
     })
-    fetching.value = false
-    lastQueryEmail.value = normalizedEmail.value
-    messages.value = [...(result.inbox || []), ...(result.trash || [])].map((message) => ({
-      ...message,
-      folder: message.folder === 'trash' ? 'trash' : 'inbox',
-      body: message.body || message.body_preview || '',
-      html: message.html || '',
-    }))
+    if (!result) return
     mailPageBeforeSearch = 1
     mailPage.value = 1
-    appStore.showSuccess('收取完成')
+    if (result.warnings?.length) appStore.showWarning(result.warnings.join('；'))
+    else appStore.showSuccess(`已获取 ${messages.value.length} 封邮件`)
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '收取邮件失败')
-  } finally {
-    fetching.value = false
   }
 }
 
@@ -322,16 +322,16 @@ async function copyRandomOutlookAlias() {
 
 function setFolder(folder: FolderKey) {
   activeFolder.value = folder
-  selectedMessage.value = null
+  reader.closeDetail()
   mailPage.value = 1
 }
 
 function selectMessage(message: QuickMailMessage) {
-  selectedMessage.value = message
+  void reader.select(message)
 }
 
 function closeDetail() {
-  selectedMessage.value = null
+  reader.closeDetail()
 }
 
 function setMailPage(page: number) {
@@ -430,9 +430,9 @@ function toggleKeyVisible() {
           <span>复制随机邮箱</span>
         </button>
 
-        <button class="btn btn-primary quick-mail-fetch-button" type="submit" :disabled="fetching">
+        <button class="btn btn-primary quick-mail-fetch-button" type="submit" @click.prevent="fetching ? reader.cancelReceive() : handleFetch()">
           <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': fetching }" />
-          <span>{{ fetching ? '获取中...' : '获取邮件' }}</span>
+          <span>{{ fetching ? '取消获取' : '获取邮件' }}</span>
         </button>
       </form>
 
@@ -511,7 +511,16 @@ function toggleKeyVisible() {
               </div>
             </div>
             <article class="quick-mail-detail-content">
+              <div v-if="detailLoading" class="flex items-center gap-2 p-6 text-gray-500" role="status">
+                <RefreshCw class="h-4 w-4 animate-spin" />
+                <span>正在加载正文…</span>
+              </div>
+              <div v-else-if="detailError" class="flex flex-wrap items-center gap-3 p-6" role="alert">
+                <span>{{ detailError }}</span>
+                <button class="btn btn-secondary" type="button" @click="selectMessage(selectedMessage)">重试加载正文</button>
+              </div>
               <SafeMailFrame
+                v-else
                 class="quick-mail-detail-body"
                 :html="selectedMessage.html"
                 :text="selectedMessage.body || selectedMessage.body_preview"

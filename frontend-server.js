@@ -9,6 +9,7 @@ const port = Number(process.env.FRONTEND_PORT || 4399)
 const webRoot = process.env.WEB_ROOT || path.join(__dirname, 'web')
 const backendURL = new URL(process.env.BACKEND_URL || 'http://127.0.0.1:4400')
 const requestTimeoutMs = Number(process.env.FRONTEND_REQUEST_TIMEOUT_MS || 30000)
+const quickMailRequestTimeoutMs = Number(process.env.FRONTEND_QUICK_MAIL_REQUEST_TIMEOUT_MS || process.env.FRONTEND_REQUEST_TIMEOUT_MS || 110000)
 const maxRequestURLLength = Number(process.env.FRONTEND_MAX_URL_LENGTH || 8192)
 
 const mimeTypes = {
@@ -33,6 +34,10 @@ function isPlainMailPath(pathname) {
 
 function isQuickMailPlainPath(pathname) {
   return /^\/(?:imap|outlook)\/mail\/[^/]+\/all\/[^/]+(?:\/[0-9]+)?$/.test(pathname)
+}
+
+function isQuickMailAPIPath(pathname) {
+  return /^\/api\/admin\/quick-mail\/(?:imap|outlook)\/(?:receive|detail)\/?$/.test(pathname)
 }
 
 function parseRequestURL(req, baseURL) {
@@ -120,6 +125,7 @@ function proxyRequest(req, res, rewritePath) {
   })
 
   upstream.on('error', (error) => {
+    if (res.destroyed) return
     console.error('frontend proxy request error:', error.message)
     if (res.headersSent || res.writableEnded) {
       res.destroy(error)
@@ -135,7 +141,16 @@ function proxyRequest(req, res, rewritePath) {
     sendJSON(res, 502, { code: 502, msg: `Backend service is temporarily unavailable: ${error.message}`, data: null })
   })
 
-  upstream.setTimeout(requestTimeoutMs)
+  upstream.setTimeout(isQuickMailAPIPath(target.pathname) || isQuickMailPlainPath(target.pathname)
+    ? quickMailRequestTimeoutMs
+    : requestTimeoutMs)
+
+  // Once a POST body has been sent, cancellation is observed on the response.
+  res.on('close', () => {
+    if (!res.writableFinished && !upstream.destroyed) {
+      upstream.destroy(new Error('client response closed'))
+    }
+  })
 
   req.on('aborted', () => {
     upstream.destroy(new Error('client request aborted'))

@@ -36,6 +36,7 @@ function readBackendPort() {
 }
 
 const backendTarget = process.env.BACKEND_URL?.trim() || `http://localhost:${readBackendPort()}`
+const mailProxyTimeout = 110_000
 
 export default defineConfig({
   plugins: [vue()],
@@ -46,11 +47,19 @@ export default defineConfig({
       '^/(imap|outlook)/mail/[^/]+/all/[^/]+(?:/[0-9]+)?(?:\\?.*)?$': {
         target: backendTarget,
         changeOrigin: true,
+        proxyTimeout: mailProxyTimeout,
+        timeout: mailProxyTimeout,
       },
       '^/mail/[^/]+/all(?:/.*)?(?:\\?.*)?$': {
         target: backendTarget,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/mail\//, '/api/public/mail/'),
+      },
+      '^/api/admin/quick-mail/(imap|outlook)/(receive|detail)(?:\\?.*)?$': {
+        target: backendTarget,
+        changeOrigin: true,
+        proxyTimeout: mailProxyTimeout,
+        timeout: mailProxyTimeout,
       },
       '/api': {
         target: backendTarget,

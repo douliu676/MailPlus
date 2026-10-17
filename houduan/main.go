@@ -927,14 +927,15 @@ type mailDataImportResult struct {
 }
 
 type receivedMailMessage struct {
-	UID       int    `json:"uid"`
-	Folder    string `json:"folder"`
-	Mailbox   string `json:"mailbox"`
-	Subject   string `json:"subject"`
-	From      string `json:"from"`
-	To        string `json:"to"`
-	Time      string `json:"time"`
-	Timestamp int64  `json:"timestamp"`
+	UID         int    `json:"uid"`
+	UIDValidity uint32 `json:"uid_validity,omitempty"`
+	Folder      string `json:"folder"`
+	Mailbox     string `json:"mailbox"`
+	Subject     string `json:"subject"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Time        string `json:"time"`
+	Timestamp   int64  `json:"timestamp"`
 }
 
 type receiveMailDetailRequest struct {
@@ -1098,6 +1099,8 @@ func main() {
 		}
 		api.POST("/admin/quick-mail/imap/receive", state.quickMailReceiveIMAP)
 		api.POST("/admin/quick-mail/outlook/receive", state.quickMailReceiveOutlook)
+		api.POST("/admin/quick-mail/imap/detail", state.quickMailDetailIMAP)
+		api.POST("/admin/quick-mail/outlook/detail", state.quickMailDetailOutlook)
 		adminAPI := api.Group("/admin", state.authMiddleware(), state.adminMiddleware())
 		{
 			adminAPI.GET("/settings", state.getAdminSettings)
@@ -6172,7 +6175,7 @@ func readSelectTotal(reader *bufio.Reader, tag string) (int, error) {
 func readFetchHeaders(reader *bufio.Reader, tag string, folder string, mailbox string) ([]receivedMailMessage, error) {
 	items := []receivedMailMessage{}
 	literalPattern := regexp.MustCompile(`\{(\d+)\}$`)
-	uidPattern := regexp.MustCompile(`UID\s+(\d+)`)
+	uidPattern := regexp.MustCompile(`(?i)\bUID\s+(\d+)`)
 	for {
 		line, err := readMailLine(reader)
 		if err != nil {
@@ -6206,7 +6209,11 @@ func readFetchHeaders(reader *bufio.Reader, tag string, folder string, mailbox s
 			if err != nil {
 				return nil, err
 			}
-			if strings.TrimSpace(next) == ")" {
+			// IMAP permits UID after the body literal, not only before it.
+			if uidMatches := uidPattern.FindStringSubmatch(next); len(uidMatches) == 2 {
+				items[len(items)-1].UID, _ = strconv.Atoi(uidMatches[1])
+			}
+			if strings.HasSuffix(strings.TrimSpace(next), ")") {
 				break
 			}
 			if strings.HasPrefix(next, tag+" ") {

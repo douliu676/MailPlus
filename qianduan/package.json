@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
+    "test:quick-mail": "node --experimental-strip-types --test tests/quick-mail-api.test.mjs tests/quick-mail-reader.test.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

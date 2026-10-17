@@ -4,13 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	stdmail "net/mail"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"mail-admin/houduan/ent"
 	"mail-admin/houduan/ent/systemsetting"
@@ -30,16 +34,32 @@ type saveQuickMailKeyRequest struct {
 }
 
 type quickMailReceiveRequest struct {
-	Email    string `json:"email"`
-	Limit    int    `json:"limit"`
-	AdminKey string `json:"admin_key"`
-	Key      string `json:"key"`
+	Email       string `json:"email"`
+	Limit       int    `json:"limit"`
+	AdminKey    string `json:"admin_key"`
+	Key         string `json:"key"`
+	IncludeBody *bool  `json:"include_body"`
+}
+
+func (req quickMailReceiveRequest) wantsBody() bool {
+	return req.IncludeBody == nil || *req.IncludeBody
+}
+
+type quickMailDetailRequest struct {
+	quickMailReceiveRequest
+	UID         int    `json:"uid"`
+	UIDValidity uint32 `json:"uid_validity"`
+	Mailbox     string `json:"mailbox"`
+	Folder      string `json:"folder"`
+	MessageID   string `json:"message_id"`
 }
 
 type quickMailMessage struct {
 	ID             string `json:"id"`
 	Source         string `json:"source"`
 	UID            int    `json:"uid,omitempty"`
+	UIDValidity    uint32 `json:"uid_validity,omitempty"`
+	MessageID      string `json:"message_id,omitempty"`
 	Folder         string `json:"folder"`
 	Mailbox        string `json:"mailbox,omitempty"`
 	Subject        string `json:"subject"`
@@ -53,11 +73,31 @@ type quickMailMessage struct {
 	BodyPreview    string `json:"body_preview,omitempty"`
 	IsRead         bool   `json:"is_read,omitempty"`
 	HasAttachments bool   `json:"has_attachments,omitempty"`
+	BodyLoaded     bool   `json:"body_loaded"`
 }
 
 type quickMailReceiveResponse struct {
-	Inbox []quickMailMessage `json:"inbox"`
-	Trash []quickMailMessage `json:"trash"`
+	Inbox    []quickMailMessage `json:"inbox"`
+	Trash    []quickMailMessage `json:"trash"`
+	Warnings []string           `json:"warnings,omitempty"`
+}
+
+func quickMailRequestContext(c *gin.Context, timeout time.Duration) context.CancelFunc {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	c.Request = c.Request.WithContext(ctx)
+	return cancel
+}
+
+func writeQuickMailError(c *gin.Context, operation string, err error) {
+	status := http.StatusBadRequest
+	message := operation + ": " + err.Error()
+	var networkError net.Error
+	if errors.Is(c.Request.Context().Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		status, message = http.StatusGatewayTimeout, operation+"超时，请稍后重试"
+	} else if errors.Is(c.Request.Context().Err(), context.Canceled) {
+		status, message = http.StatusRequestTimeout, "请求已取消"
+	}
+	c.JSON(status, apiResponse{Code: status, Msg: message})
 }
 
 func (s *appState) getQuickMailKey(c *gin.Context) {
@@ -99,6 +139,8 @@ func (s *appState) updateQuickMailKey(c *gin.Context) {
 }
 
 func (s *appState) quickMailReceiveIMAP(c *gin.Context) {
+	cancel := quickMailRequestContext(c, quickMailReceiveTimeout)
+	defer cancel()
 	var req quickMailReceiveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "请求参数错误"})
@@ -127,33 +169,41 @@ func (s *appState) quickMailReceiveIMAP(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "输入有误"})
 		return
 	}
-	messages, err := receiveMailHeaders(c.Request.Context(), account, limit)
+	started := time.Now()
+	messages, warnings, err := receiveQuickIMAPHeaders(c.Request.Context(), account, limit)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "收取邮件失败: " + err.Error()})
+		writeQuickMailError(c, "收取邮件", err)
 		return
 	}
-	inbox, err := quickIMAPMessagesWithDetails(c.Request.Context(), account, account.Email, messages.Inbox)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "读取邮件内容失败: " + err.Error()})
-		return
-	}
-	trash, err := quickIMAPMessagesWithDetails(c.Request.Context(), account, account.Email, messages.Trash)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "读取邮件内容失败: " + err.Error()})
-		return
+	log.Printf("quick-mail imap headers: inbox=%d trash=%d elapsed=%s", len(messages.Inbox), len(messages.Trash), time.Since(started).Round(time.Millisecond))
+	inbox := quickIMAPMessages(account.Email, messages.Inbox)
+	trash := quickIMAPMessages(account.Email, messages.Trash)
+	// POP3 sequence numbers can change between sessions. Keep its complete-response
+	// behaviour instead of using them as identifiers for a later lazy request.
+	if req.wantsBody() || strings.EqualFold(strings.TrimSpace(account.ImapProtocol), "POP3") {
+		items := append(append([]receivedMailMessage{}, messages.Inbox...), messages.Trash...)
+		details, detailErr := quickIMAPMessagesWithDetails(c.Request.Context(), account, account.Email, items)
+		if detailErr != nil {
+			writeQuickMailError(c, "读取邮件内容", detailErr)
+			return
+		}
+		inbox, trash = details[:len(messages.Inbox)], details[len(messages.Inbox):]
 	}
 
 	c.JSON(http.StatusOK, apiResponse{
 		Code: 0,
 		Data: quickMailReceiveResponse{
-			Inbox: inbox,
-			Trash: trash,
+			Inbox:    inbox,
+			Trash:    trash,
+			Warnings: warnings,
 		},
 		Msg: "ok",
 	})
 }
 
 func (s *appState) quickMailReceiveOutlook(c *gin.Context) {
+	cancel := quickMailRequestContext(c, quickMailReceiveTimeout)
+	defer cancel()
 	var req quickMailReceiveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "请求参数错误"})
@@ -185,42 +235,51 @@ func (s *appState) quickMailReceiveOutlook(c *gin.Context) {
 	token, err := refreshOutlookAccessToken(c.Request.Context(), db, account)
 	if err != nil {
 		updateOutlookAccountStatus(c.Request.Context(), db, account.ID, "error", err.Error())
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "收取邮件失败: " + err.Error()})
+		writeQuickMailError(c, "收取邮件", err)
 		return
 	}
 
 	inbox, err := fetchOutlookMessages(c.Request.Context(), token, "inbox", limit, 0, "")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "收取邮件失败: " + err.Error()})
+		writeQuickMailError(c, "收取邮件", err)
 		return
 	}
+	var warnings []string
 	trash, err := fetchOutlookMessages(c.Request.Context(), token, "junkemail", limit, 0, "")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "收取邮件失败: " + err.Error()})
-		return
+		if req.wantsBody() {
+			writeQuickMailError(c, "收取邮件", err)
+			return
+		}
+		trash = []outlookMessageResponse{}
+		warnings = []string{"收件箱已获取，垃圾箱读取失败，可重新获取"}
 	}
-	inboxMessages, err := quickOutlookMessagesWithDetails(c.Request.Context(), token, account.Email, inbox)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "读取邮件内容失败: " + err.Error()})
-		return
-	}
-	trashMessages, err := quickOutlookMessagesWithDetails(c.Request.Context(), token, account.Email, trash)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "读取邮件内容失败: " + err.Error()})
-		return
+	inboxMessages := quickOutlookMessages(account.Email, inbox)
+	trashMessages := quickOutlookMessages(account.Email, trash)
+	if req.wantsBody() {
+		items := append(append([]outlookMessageResponse{}, inbox...), trash...)
+		details, detailErr := quickOutlookMessagesWithDetails(c.Request.Context(), token, account.Email, items)
+		if detailErr != nil {
+			writeQuickMailError(c, "读取邮件内容", detailErr)
+			return
+		}
+		inboxMessages, trashMessages = details[:len(inbox)], details[len(inbox):]
 	}
 
 	c.JSON(http.StatusOK, apiResponse{
 		Code: 0,
 		Data: quickMailReceiveResponse{
-			Inbox: inboxMessages,
-			Trash: trashMessages,
+			Inbox:    inboxMessages,
+			Trash:    trashMessages,
+			Warnings: warnings,
 		},
 		Msg: "ok",
 	})
 }
 
 func (s *appState) getQuickMailIMAPPlain(c *gin.Context) {
+	cancel := quickMailRequestContext(c, quickMailReceiveTimeout)
+	defer cancel()
 	if !s.authorizeQuickMailPlainRequest(c, quickMailRouteKey(c)) {
 		return
 	}
@@ -237,6 +296,8 @@ func (s *appState) getQuickMailIMAPPlain(c *gin.Context) {
 }
 
 func (s *appState) getQuickMailOutlookPlain(c *gin.Context) {
+	cancel := quickMailRequestContext(c, quickMailReceiveTimeout)
+	defer cancel()
 	if !s.authorizeQuickMailPlainRequest(c, quickMailRouteKey(c)) {
 		return
 	}
@@ -395,7 +456,7 @@ func fetchQuickIMAPPlainMessages(ctx context.Context, email string, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("邮箱账号不存在或已停用")
 	}
-	headers, err := receiveMailHeaders(ctx, account, limit)
+	headers, _, err := receiveQuickIMAPHeaders(ctx, account, limit)
 	if err != nil {
 		return nil, fmt.Errorf("收取邮件失败: %s", err.Error())
 	}
@@ -408,20 +469,7 @@ func fetchQuickIMAPPlainMessages(ctx context.Context, email string, limit int) (
 		items = items[:limit]
 	}
 
-	messages := make([]quickMailMessage, 0, len(items))
-	for _, item := range items {
-		var detail receiveMailDetailResponse
-		if strings.EqualFold(strings.TrimSpace(account.ImapProtocol), "POP3") {
-			detail, err = receivePOP3MailDetail(ctx, account, item.UID)
-		} else {
-			detail, err = receiveIMAPMailDetail(ctx, account, item.Mailbox, item.Folder, item.UID)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("读取邮件内容失败: %s", err.Error())
-		}
-		messages = append(messages, quickIMAPDetailMessage(email, item, detail))
-	}
-	return messages, nil
+	return quickIMAPMessagesWithDetails(ctx, account, email, items)
 }
 
 func fetchQuickOutlookPlainMessages(ctx context.Context, email string, limit int) ([]quickMailMessage, error) {
@@ -485,18 +533,20 @@ func quickIMAPDetailMessage(email string, header receivedMailMessage, detail rec
 		timestamp = header.Timestamp
 	}
 	return quickMailMessage{
-		ID:        publicIMAPMessageKey(email, header),
-		Source:    "imap",
-		UID:       uid,
-		Folder:    valueOrDefault(detail.Folder, header.Folder),
-		Mailbox:   valueOrDefault(detail.Mailbox, header.Mailbox),
-		Subject:   valueOrDefault(detail.Subject, header.Subject),
-		From:      valueOrDefault(detail.From, header.From),
-		To:        valueOrDefault(detail.To, header.To),
-		Time:      valueOrDefault(detail.Time, header.Time),
-		Timestamp: timestamp,
-		Body:      detail.Body,
-		HTML:      detail.HTML,
+		ID:          publicIMAPMessageKey(email, header),
+		Source:      "imap",
+		UID:         uid,
+		UIDValidity: detail.UIDValidity,
+		Folder:      valueOrDefault(detail.Folder, header.Folder),
+		Mailbox:     valueOrDefault(detail.Mailbox, header.Mailbox),
+		Subject:     valueOrDefault(detail.Subject, header.Subject),
+		From:        valueOrDefault(detail.From, header.From),
+		To:          valueOrDefault(detail.To, header.To),
+		Time:        valueOrDefault(detail.Time, header.Time),
+		Timestamp:   timestamp,
+		Body:        detail.Body,
+		HTML:        detail.HTML,
+		BodyLoaded:  true,
 	}
 }
 
@@ -598,19 +648,30 @@ func normalizeQuickMailLimit(value int) int {
 }
 
 func quickIMAPMessagesWithDetails(ctx context.Context, account mailAccountTestConfig, email string, items []receivedMailMessage) ([]quickMailMessage, error) {
-	result := make([]quickMailMessage, 0, len(items))
-	for _, item := range items {
-		var detail receiveMailDetailResponse
-		var err error
-		if strings.EqualFold(strings.TrimSpace(account.ImapProtocol), "POP3") {
-			detail, err = receivePOP3MailDetail(ctx, account, item.UID)
-		} else {
-			detail, err = receiveIMAPMailDetail(ctx, account, item.Mailbox, item.Folder, item.UID)
+	workers := quickMailConcurrency
+	if strings.EqualFold(strings.TrimSpace(account.ImapProtocol), "POP3") {
+		workers = 1
+	}
+	details, err := collectQuickMailDetails(ctx, items, workers, func(workerCtx context.Context) (quickMailDetailSession, error) {
+		if workers == 1 && strings.EqualFold(strings.TrimSpace(account.ImapProtocol), "POP3") {
+			session, err := openQuickPOP3Session(workerCtx, account)
+			if err != nil {
+				return nil, err
+			}
+			return session, nil
 		}
+		session, err := openQuickIMAPSession(workerCtx, account)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, quickIMAPDetailMessage(email, item, detail))
+		return session, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]quickMailMessage, len(items))
+	for i, item := range items {
+		result[i] = quickIMAPDetailMessage(email, item, details[i])
 	}
 	return result, nil
 }
@@ -647,23 +708,31 @@ func quickOutlookMessagesWithDetails(ctx context.Context, accessToken string, em
 		}
 		hydrated = append(hydrated, item)
 	}
-	return quickOutlookMessages(email, hydrated), nil
+	result := quickOutlookMessages(email, hydrated)
+	for i := range result {
+		if _, ok := detailsByID[items[i].ID]; !ok {
+			return nil, fmt.Errorf("部分邮件正文未能读取，请重试")
+		}
+		result[i].BodyLoaded = true
+	}
+	return result, nil
 }
 
 func quickIMAPMessages(email string, items []receivedMailMessage) []quickMailMessage {
 	result := make([]quickMailMessage, 0, len(items))
 	for _, item := range items {
 		result = append(result, quickMailMessage{
-			ID:        publicIMAPMessageKey(email, item),
-			Source:    "imap",
-			UID:       item.UID,
-			Folder:    item.Folder,
-			Mailbox:   item.Mailbox,
-			Subject:   item.Subject,
-			From:      item.From,
-			To:        item.To,
-			Time:      item.Time,
-			Timestamp: item.Timestamp,
+			ID:          publicIMAPMessageKey(email, item),
+			Source:      "imap",
+			UID:         item.UID,
+			UIDValidity: item.UIDValidity,
+			Folder:      item.Folder,
+			Mailbox:     item.Mailbox,
+			Subject:     item.Subject,
+			From:        item.From,
+			To:          item.To,
+			Time:        item.Time,
+			Timestamp:   item.Timestamp,
 		})
 	}
 	return result
@@ -682,6 +751,7 @@ func quickOutlookMessages(email string, items []outlookMessageResponse) []quickM
 		}
 		result = append(result, quickMailMessage{
 			ID:             publicOutlookMessageKey(email, item),
+			MessageID:      item.ID,
 			Source:         "outlook",
 			Folder:         folder,
 			Subject:        item.Subject,

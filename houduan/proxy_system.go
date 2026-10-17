@@ -1045,12 +1045,21 @@ func dialTCPThroughEndpoint(ctx context.Context, endpoint proxyEndpoint, network
 		if endpoint.Username == "" && endpoint.Password == "" {
 			auth = nil
 		}
-		base := &contextProxyDialer{ctx: ctx, timeout: timeout}
+		base := &net.Dialer{Timeout: timeout}
 		dialer, err := xnetproxy.SOCKS5("tcp", net.JoinHostPort(endpoint.Address, strconv.Itoa(endpoint.Port)), auth, base)
 		if err != nil {
 			return nil, err
 		}
-		return dialer.Dial(network, address)
+		contextDialer, ok := dialer.(xnetproxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("SOCKS5 代理不支持可取消连接")
+		}
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		return contextDialer.DialContext(ctx, network, address)
 	case proxyProtocolHTTP:
 		return dialHTTPConnectProxy(ctx, endpoint, address, timeout)
 	default:
@@ -1058,25 +1067,29 @@ func dialTCPThroughEndpoint(ctx context.Context, endpoint proxyEndpoint, network
 	}
 }
 
-type contextProxyDialer struct {
-	ctx     context.Context
-	timeout time.Duration
-}
-
-func (d *contextProxyDialer) Dial(network string, address string) (net.Conn, error) {
-	ctx := d.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	dialer := &net.Dialer{Timeout: d.timeout}
-	return dialer.DialContext(ctx, network, address)
-}
-
 func dialHTTPConnectProxy(ctx context.Context, endpoint proxyEndpoint, target string, timeout time.Duration) (net.Conn, error) {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	dialer := &net.Dialer{Timeout: timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(endpoint.Address, strconv.Itoa(endpoint.Port)))
 	if err != nil {
 		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = conn.Close()
+		}
+	}()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return nil, err
+		}
 	}
 	request := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n"
 	if endpoint.Username != "" || endpoint.Password != "" {
@@ -1092,13 +1105,24 @@ func dialHTTPConnectProxy(ctx context.Context, endpoint proxyEndpoint, target st
 	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
-	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_ = conn.Close()
 		return nil, fmt.Errorf("HTTP 代理 CONNECT 失败: %s", resp.Status)
 	}
+	// A successful CONNECT has become a tunnel. Closing/draining its response
+	// body can consume tunnel bytes or wait forever for the tunnel to close.
+	if !stop() || ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
+	succeeded = true
 	return &bufferedConn{Conn: conn, reader: reader}, nil
 }
 
