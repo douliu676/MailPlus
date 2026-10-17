@@ -257,6 +257,11 @@ func (s *quickIMAPSession) readDetail(item receivedMailMessage) (receiveMailDeta
 	header := parseFullMailHeader(raw, item.Folder, s.mailbox)
 	header.UID, header.UIDValidity = item.UID, s.uidValidity
 	body, html := parseMailBody(raw)
+	// A response can race the cancellation callback that closes the socket.
+	// Do not publish a body after its request has already been cancelled.
+	if err := s.ctx.Err(); err != nil {
+		return receiveMailDetailResponse{}, err
+	}
 	return receiveMailDetailResponse{receivedMailMessage: header, Body: body, HTML: html}, nil
 }
 

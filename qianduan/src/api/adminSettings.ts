@@ -18,6 +18,8 @@ export type SystemSettings = {
   backup_webdav_url: string
   backup_webdav_username: string
   backup_webdav_password: string
+  backup_webdav_password_configured?: boolean
+  backup_webdav_clear_password?: boolean
   backup_webdav_remote_dir: string
 }
 
@@ -69,6 +71,7 @@ export type DatabaseBackupTaskPayload = Pick<
   | 'backup_webdav_url'
   | 'backup_webdav_username'
   | 'backup_webdav_password'
+  | 'backup_webdav_clear_password'
   | 'backup_webdav_remote_dir'
 >
 

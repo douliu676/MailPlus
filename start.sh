@@ -49,12 +49,6 @@ wait_for_postgres() {
   return 1
 }
 
-cleanup_xray() {
-  for pid in $(ps 2>/dev/null | awk '/[m]ail-admin-xray/ && /config.json/ {print $1}'); do
-    kill "$pid" 2>/dev/null || true
-  done
-}
-
 start_backend
 
 node /app/frontend-server.js &
@@ -69,7 +63,6 @@ cleanup() {
     kill "$FRONTEND_PID" 2>/dev/null || true
     wait "$FRONTEND_PID" 2>/dev/null || true
   fi
-  cleanup_xray
 }
 
 trap cleanup INT TERM EXIT
@@ -80,7 +73,6 @@ while true; do
   EXIT_CODE="$?"
   set -e
   BACKEND_PID=""
-  cleanup_xray
 
   if [ "$EXIT_CODE" -eq "$RESTORE_RESTART_EXIT_CODE" ]; then
     echo "database restore completed, waiting for postgres before backend restart"

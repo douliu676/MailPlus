@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import { Check, ChevronDown, ChevronRight, CircleHelp, Copy, Download, ExternalLink, Folder, FolderPlus, Inbox, KeyRound, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Search, StickyNote, Trash2, Upload, X } from 'lucide-vue-next'
@@ -14,6 +15,7 @@ import { normalizeOutlookAccountPageCache, outlookAccountPageCacheKey, outlookMa
 import { watchAuthSession } from '../api/session'
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const taskStore = useTaskStore()
 const queryClient = useQueryClient()
 const searchQuery = ref('')
@@ -542,6 +544,7 @@ function restoreOutlookManagementCache() {
 }
 
 function saveOutlookManagementCache() {
+  if (!mayWriteSessionCache()) return
   try {
     rememberCurrentOutlookAccountPage()
     localStorage.setItem(
@@ -1550,6 +1553,7 @@ function readStoredReadCache(accountID: number) {
 }
 
 function saveReadCache(accountID: number) {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(
       getReadCacheStorageKey(accountID),

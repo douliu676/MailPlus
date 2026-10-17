@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,12 +151,14 @@ type proxyEndpoint struct {
 }
 
 type proxyRuntime struct {
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	configPath string
-	configHash string
-	lastError  string
-	startedAt  time.Time
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	processDone <-chan struct{}
+	configDir   string
+	configPath  string
+	configHash  string
+	lastError   string
+	startedAt   time.Time
 }
 
 func newProxyRuntime() *proxyRuntime {
@@ -1248,26 +1251,17 @@ func (r *proxyRuntime) ensureForSelected(ctx context.Context, extraNodeIDs ...in
 		r.lastError = err.Error()
 		return err
 	}
-	configPath, err := writeXrayConfig(config)
+	configPath, err := r.writeXrayConfig(config)
 	if err != nil {
 		r.lastError = err.Error()
 		return err
 	}
-	if err := r.startXrayLocked(bin, configPath, hash); err == nil {
-		return nil
-	}
-	if err := cleanupMailAdminXrayProcesses(); err != nil {
-		fmt.Fprintf(os.Stderr, "cleanup stale xray process: %v\n", err)
-	}
-	r.cmd = nil
-	r.configPath = ""
-	r.configHash = ""
-	r.startedAt = time.Time{}
 	return r.startXrayLocked(bin, configPath, hash)
 }
 
 func (r *proxyRuntime) startXrayLocked(bin, configPath, hash string) error {
 	cmd := exec.CommandContext(context.Background(), bin, "run", "-config", configPath)
+	configureBackgroundProcess(cmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -1279,8 +1273,11 @@ func (r *proxyRuntime) startXrayLocked(bin, configPath, hash string) error {
 	r.configHash = hash
 	r.lastError = ""
 	r.startedAt = time.Now()
+	done := make(chan struct{})
+	r.processDone = done
 	go func() {
 		_ = cmd.Wait()
+		close(done)
 	}()
 	time.Sleep(250 * time.Millisecond)
 	if !r.processRunningLocked() {
@@ -1306,16 +1303,24 @@ func (r *proxyRuntime) stop() {
 	r.stopLocked(true)
 }
 
-func (r *proxyRuntime) stopLocked(cleanStale bool) {
+func (r *proxyRuntime) stopLocked(cleanupFiles bool) {
+	// The exec handle belongs to this instance; never enumerate or kill by name.
 	if r.cmd != nil && r.cmd.Process != nil && r.processRunningLocked() {
 		_ = r.cmd.Process.Kill()
 	}
-	if cleanStale {
-		if err := cleanupMailAdminXrayProcesses(); err != nil {
-			fmt.Fprintf(os.Stderr, "cleanup stale xray process: %v\n", err)
+	if r.processDone != nil {
+		select {
+		case <-r.processDone:
+		case <-time.After(3 * time.Second):
 		}
 	}
+	if cleanupFiles && r.configDir != "" {
+		_ = os.Remove(filepath.Join(r.configDir, "config.json"))
+		_ = os.Remove(r.configDir)
+		r.configDir = ""
+	}
 	r.cmd = nil
+	r.processDone = nil
 	r.configHash = ""
 	r.configPath = ""
 	r.lastError = ""
@@ -1323,7 +1328,15 @@ func (r *proxyRuntime) stopLocked(cleanStale bool) {
 }
 
 func (r *proxyRuntime) processRunningLocked() bool {
-	return r.cmd != nil && r.cmd.Process != nil && r.cmd.ProcessState == nil
+	if r.cmd == nil || r.cmd.Process == nil || r.processDone == nil {
+		return false
+	}
+	select {
+	case <-r.processDone:
+		return false
+	default:
+		return true
+	}
 }
 
 func (r *proxyRuntime) snapshot() gin.H {
@@ -1381,6 +1394,8 @@ func selectedXrayNodes(ctx context.Context, extraNodeIDs ...int) ([]proxyNode, e
 }
 
 func buildXrayConfig(nodes []proxyNode) ([]byte, error) {
+	nodes = append([]proxyNode(nil), nodes...)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 	inbounds := []map[string]interface{}{}
 	outbounds := []map[string]interface{}{}
 	rules := []map[string]interface{}{}
@@ -1421,6 +1436,10 @@ func xrayOutboundForNode(node proxyNode, tag string) (map[string]interface{}, er
 		return map[string]interface{}{
 			"tag":      tag,
 			"protocol": "vmess",
+			// The bundled core's chunked VMess stream can close when the mail
+			// server speaks first. Mux sends the target frame before the greeting,
+			// preserving the configured encryption and the mail protocol itself.
+			"mux": map[string]interface{}{"enabled": true, "concurrency": 8},
 			"settings": map[string]interface{}{
 				"vnext": []map[string]interface{}{{"address": node.Address, "port": node.Port, "users": []map[string]interface{}{user}}},
 			},
@@ -1496,63 +1515,16 @@ func xrayStreamSettings(node proxyNode) map[string]interface{} {
 	return stream
 }
 
-func writeXrayConfig(config []byte) (string, error) {
-	dir := filepath.Join(os.TempDir(), "mail-admin-xray")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
+func (r *proxyRuntime) writeXrayConfig(config []byte) (string, error) {
+	if r.configDir == "" {
+		dir, err := os.MkdirTemp(os.TempDir(), fmt.Sprintf("mailplus-xray-%d-", os.Getpid()))
+		if err != nil {
+			return "", err
+		}
+		r.configDir = dir
 	}
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(r.configDir, "config.json")
 	return path, os.WriteFile(path, config, 0600)
-}
-
-func cleanupMailAdminXrayProcesses() error {
-	switch runtime.GOOS {
-	case "windows":
-		return cleanupMailAdminXrayProcessesWindows()
-	default:
-		return cleanupMailAdminXrayProcessesProc()
-	}
-}
-
-func cleanupMailAdminXrayProcessesWindows() error {
-	script := `$targets = Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'xray.exe' -and $_.CommandLine -and $_.CommandLine -like '*mail-admin-xray*config.json*' }; foreach ($p in $targets) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }`
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
-	return cmd.Run()
-}
-
-func cleanupMailAdminXrayProcessesProc() error {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 0 || pid == os.Getpid() {
-			continue
-		}
-		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
-		if err != nil || len(cmdline) == 0 {
-			continue
-		}
-		text := strings.ReplaceAll(string(cmdline), "\x00", " ")
-		firstArg := strings.TrimSpace(strings.Split(text, " ")[0])
-		if !strings.Contains(strings.ToLower(filepath.Base(firstArg)), "xray") {
-			continue
-		}
-		if !strings.Contains(text, "mail-admin-xray") || !strings.Contains(text, "config.json") {
-			continue
-		}
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Kill()
-		}
-	}
-	return nil
 }
 
 func xrayBinaryPath() (string, error) {

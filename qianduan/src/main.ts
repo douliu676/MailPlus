@@ -2,7 +2,8 @@ import { createApp } from 'vue'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import App from './App.vue'
 import router from './router'
-import { installAuthFetchInterceptor } from './api/session'
+import { installAuthFetchInterceptor, watchAuthSession } from './api/session'
+import { resetTaskSession } from './stores/tasks'
 import './style.css'
 
 installAuthFetchInterceptor()
@@ -16,6 +17,12 @@ const queryClient = new QueryClient({
       retry: 1,
     },
   },
+})
+
+resetTaskSession()
+watchAuthSession(() => {
+  queryClient.clear()
+  resetTaskSession()
 })
 
 createApp(App).use(VueQueryPlugin, { queryClient }).use(router).mount('#app')

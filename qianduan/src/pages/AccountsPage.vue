@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import { Check, ChevronDown, ChevronRight, CircleHelp, Copy, Download, Folder, FolderPlus, Inbox, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Search, Send, Server, StickyNote, Trash2, Upload, X } from 'lucide-vue-next'
@@ -15,6 +16,7 @@ import { mailAccountPageCacheKey, mailManagementCacheKey, normalizeMailAccountPa
 import { watchAuthSession } from '../api/session'
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const taskStore = useTaskStore()
 const queryClient = useQueryClient()
 const searchQuery = ref('')
@@ -587,6 +589,7 @@ function restoreMailManagementCache() {
 }
 
 function saveMailManagementCache() {
+  if (!mayWriteSessionCache()) return
   try {
     rememberCurrentMailAccountPage()
     localStorage.setItem(
@@ -1349,6 +1352,7 @@ function readStoredReceiveCache(accountID: number) {
 }
 
 function saveReceiveCache(accountID: number) {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(
       getReceiveCacheStorageKey(accountID),

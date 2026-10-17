@@ -1,4 +1,5 @@
 ﻿<script setup lang="ts">
+import { logout as logoutSession } from '../api/auth'
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
@@ -27,7 +28,7 @@ import AppLogo from '../components/AppLogo.vue'
 import TaskCenter from '../components/TaskCenter.vue'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
-import { clearAuthSession, getSessionItem, setSessionItem } from '../api/session'
+import { getSessionItem, setSessionItem } from '../api/session'
 import { checkAppUpdate, type UpdateCheckResult } from '../api/adminSettings'
 
 const sidebarStorageKey = 'admin_sidebar_collapsed'
@@ -272,7 +273,7 @@ watch(mobileSidebarOpen, (open) => {
 
 function logout() {
   closeUserDropdown()
-  clearAuthSession()
+  logoutSession()
   router.replace('/login')
 }
 

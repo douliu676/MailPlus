@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, onMounted, reactive, ref } from 'vue'
 import {
   Database,
@@ -33,6 +34,7 @@ import { useTaskStore } from '../stores/tasks'
 type SettingsTab = 'general' | 'backup'
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const taskStore = useTaskStore()
 const settingsPageCacheKey = 'system_settings_cache_v3'
 const activeTab = ref<SettingsTab>('general')
@@ -42,6 +44,7 @@ const backingUp = ref(false)
 const manualBackupStarting = ref(false)
 const restoring = ref(false)
 const testingWebDAV = ref(false)
+const clearWebDAVPassword = ref(false)
 const logoUploadError = ref('')
 const restoreModalOpen = ref(false)
 const restoreFile = ref<File | null>(null)
@@ -96,7 +99,8 @@ const form = reactive<SystemSettings>({
 })
 
 function assignSettings(settings: SystemSettings) {
-  Object.assign(form, settings)
+  Object.assign(form, settings, { backup_webdav_password: '' })
+  clearWebDAVPassword.value = false
   tablePageSizeOptionsInput.value = (form.table_page_size_options || []).join(', ')
 }
 
@@ -113,11 +117,12 @@ function restoreSettingsCache() {
 }
 
 function saveSettingsCache(settings: SystemSettings) {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(
       settingsPageCacheKey,
       JSON.stringify({
-        settings,
+        settings: { ...settings, backup_webdav_password: '' },
         updated_at: Date.now(),
       })
     )
@@ -265,7 +270,7 @@ async function saveSettings() {
     updateScheduleTime('hour', backupScheduleHour.value)
     updateScheduleTime('minute', backupScheduleMinute.value)
     form.backup_schedule_retain_count = clampWholeNumber(form.backup_schedule_retain_count, 1, 365)
-    const updated = await updateAdminSettings({ ...form })
+    const updated = await updateAdminSettings({ ...form, backup_webdav_clear_password: clearWebDAVPassword.value })
     assignSettings(updated)
     saveSettingsCache(updated)
     await appStore.fetchPublicSettings(true)
@@ -309,6 +314,7 @@ function databaseBackupTaskPayload(): DatabaseBackupTaskPayload {
     backup_webdav_url: form.backup_webdav_url,
     backup_webdav_username: form.backup_webdav_username,
     backup_webdav_password: form.backup_webdav_password,
+    backup_webdav_clear_password: clearWebDAVPassword.value,
     backup_webdav_remote_dir: form.backup_webdav_remote_dir,
   }
 }
@@ -763,8 +769,9 @@ onMounted(() => loadSettings({ showLoading: !hasSettingsCache }))
             <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
               <label class="block md:col-span-2">
                 <span class="input-label">WebDAV 地址</span>
-                <input v-model.trim="form.backup_webdav_url" class="input" type="url" placeholder="https://example.com/dav" />
-                <span class="hint">填写 WebDAV 服务地址</span>
+                <input v-model.trim="form.backup_webdav_url" class="input" type="url" placeholder="http://127.0.0.1:5244/dav" />
+                <span class="hint">填写包含 http:// 或 https:// 的完整地址，支持 localhost、本机和局域网 NAS 的 WebDAV 服务。</span>
+                <span class="hint">地址由后端访问。Docker 中 localhost 指容器自身；访问宿主机请使用可达的宿主机 IP，或已配置的 host.docker.internal。</span>
               </label>
               <label class="block">
                 <span class="input-label">用户名</span>
@@ -772,7 +779,10 @@ onMounted(() => loadSettings({ showLoading: !hasSettingsCache }))
               </label>
               <label class="block">
                 <span class="input-label">密码</span>
-                <input v-model="form.backup_webdav_password" class="input" type="password" autocomplete="new-password" />
+                <input v-model="form.backup_webdav_password" class="input" type="password" autocomplete="new-password" :placeholder="form.backup_webdav_password_configured && !clearWebDAVPassword ? '已设置，留空保留' : '输入 WebDAV 密码'" @input="clearWebDAVPassword = false" />
+                <button v-if="form.backup_webdav_password_configured" class="text-sm text-gray-500" type="button" @click="clearWebDAVPassword = !clearWebDAVPassword; form.backup_webdav_password = ''">
+                  {{ clearWebDAVPassword ? '已选择清除，点击取消' : '清除已保存密码（保存后生效）' }}
+                </button>
               </label>
               <label class="block md:col-span-2">
                 <span class="input-label">远程目录</span>

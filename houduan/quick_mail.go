@@ -403,23 +403,15 @@ func (s *appState) authorizeQuickMailPlainRequest(c *gin.Context, key string) bo
 }
 
 func (s *appState) optionalAdminAuthUserID(c *gin.Context) (int, bool) {
-	header := strings.TrimSpace(c.GetHeader("Authorization"))
-	if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
+	session, ok := s.sessions.get(bearerToken(c))
+	if !ok || session.Kind != accessSession {
 		return 0, false
 	}
-	token := strings.TrimSpace(header[len("Bearer "):])
-	session, ok := s.sessions.get(token)
-	if !ok {
+	current, err := s.sessionUser(c.Request.Context(), session)
+	if err != nil || userMustChangePassword(c.Request.Context(), current.ID) {
 		return 0, false
 	}
-	current, err := s.db.User.Get(c.Request.Context(), session.UserID)
-	if err != nil || !current.Enabled || current.Role != "admin" {
-		return 0, false
-	}
-	if userMustChangePassword(c.Request.Context(), current.ID) {
-		return 0, false
-	}
-	return session.UserID, true
+	return current.ID, true
 }
 
 func (s *appState) quickMailKeyConfigured(ctx context.Context) (bool, error) {

@@ -1,4 +1,5 @@
 ﻿<script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import {
@@ -35,6 +36,7 @@ type SortKey = 'email' | 'id' | 'username' | 'role' | 'balance' | 'status' | 'cr
 type SortOrder = 'asc' | 'desc'
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const loading = ref(false)
 const tableLoading = ref(true)
@@ -191,6 +193,7 @@ function restoreUsersManagementCache() {
 }
 
 function saveUsersManagementCache() {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(
       usersManagementCacheKey,

@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { getAuthToken, getAuthUserRole } from '../api/session'
 
 export type BackgroundTask = {
   id: string
@@ -34,6 +35,18 @@ const pollingTimers = new Map<string, number>()
 const cleanupRefreshTimers = new Map<string, number>()
 const cleanupRefreshDeadlines = new Map<string, number>()
 const settledCallbacks = new Set<string>()
+let sessionEpoch = 0
+
+export function resetTaskSession() {
+  sessionEpoch++
+  for (const timer of [...pollingTimers.values(), ...cleanupRefreshTimers.values()]) window.clearTimeout(timer)
+  pollingTimers.clear()
+  cleanupRefreshTimers.clear()
+  cleanupRefreshDeadlines.clear()
+  callbacks.clear()
+  settledCallbacks.clear()
+  tasks.value = []
+}
 
 const orderedTasks = computed(() =>
   [...tasks.value].sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running') || Date.parse(b.updated_at || '') - Date.parse(a.updated_at || '') || b.tracked_at - a.tracked_at)
@@ -42,7 +55,7 @@ const runningTasks = computed(() => tasks.value.filter((task) => task.status ===
 const finishedTasks = computed(() => tasks.value.filter((task) => task.status !== 'running'))
 
 function readCachedTasks() {
-  if (typeof localStorage === 'undefined') return []
+  if (typeof localStorage === 'undefined' || !getAuthToken() || getAuthUserRole() !== 'admin') return []
   try {
     const value = JSON.parse(localStorage.getItem(taskStorageKey) || '[]')
     if (!Array.isArray(value)) return []
@@ -168,7 +181,10 @@ function trackTask(task: BackgroundTask, options: TaskTrackOptions = {}) {
 }
 
 async function refreshTasks() {
+  if (!getAuthToken() || getAuthUserRole() !== 'admin') return
+  const epoch = sessionEpoch
   const latestTasks = await requestTasks()
+  if (epoch !== sessionEpoch) return
   for (const task of latestTasks) {
     const tracked = upsertTask(task)
     if (tracked.status === 'running') {
@@ -181,10 +197,12 @@ async function refreshTasks() {
 
 function startPolling(id: string) {
   if (pollingTimers.has(id)) return
+  const epoch = sessionEpoch
 
   const poll = async () => {
     try {
       const latest = await requestTask(id)
+      if (epoch !== sessionEpoch) return
       const tracked = upsertTask(latest)
       if (tracked.status === 'running') {
         pollingTimers.set(id, window.setTimeout(poll, 1000))
@@ -194,7 +212,7 @@ function startPolling(id: string) {
       scheduleTaskExpiry(tracked)
       await runSettledCallback(tracked)
     } catch {
-      pollingTimers.set(id, window.setTimeout(poll, 2500))
+      if (epoch === sessionEpoch) pollingTimers.set(id, window.setTimeout(poll, 2500))
     }
   }
 
@@ -208,7 +226,9 @@ async function runSettledCallback(task: BackgroundTask) {
 }
 
 async function downloadTask(task: BackgroundTask) {
+  const epoch = sessionEpoch
   const blob = await requestTaskBlob(task.id)
+  if (epoch !== sessionEpoch) return
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -218,7 +238,7 @@ async function downloadTask(task: BackgroundTask) {
   anchor.remove()
   URL.revokeObjectURL(url)
   const latest = await requestTask(task.id).catch(() => null)
-  if (latest) {
+  if (latest && epoch === sessionEpoch) {
     const tracked = upsertTask(latest)
     scheduleTaskExpiry(tracked)
   }
@@ -260,6 +280,7 @@ function forgetTask(id: string) {
 }
 
 function scheduleTaskExpiry(task: BackgroundTask | TrackedTask) {
+  const epoch = sessionEpoch
   const deadline = taskExpiryDeadline(task)
   if (!deadline || !Number.isFinite(deadline)) return
   const existingDeadline = cleanupRefreshDeadlines.get(task.id)
@@ -270,10 +291,11 @@ function scheduleTaskExpiry(task: BackgroundTask | TrackedTask) {
   cleanupRefreshTimers.set(
     task.id,
     window.setTimeout(async () => {
+      if (epoch !== sessionEpoch) return
       cleanupRefreshTimers.delete(task.id)
       cleanupRefreshDeadlines.delete(task.id)
       await requestDeleteTask(task.id).catch(() => undefined)
-      forgetTask(task.id)
+      if (epoch === sessionEpoch) forgetTask(task.id)
     }, Math.max(0, delay))
   )
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Eye, EyeOff, ImageUp, KeyRound, Save, ShieldCheck, Trash2 } from 'lucide-vue-next'
@@ -18,6 +19,7 @@ type ProfileUser = {
 }
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const router = useRouter()
 const avatarDraft = ref('')
 const profileSaving = ref(false)
@@ -78,6 +80,7 @@ const memberSince = computed(() => {
 })
 
 function persistUser(nextUser: ProfileUser) {
+  if (!mayWriteSessionCache()) return
   user.value = { ...user.value, ...nextUser }
   profileForm.username = user.value.username
   setSessionItem('auth_user', JSON.stringify(user.value))
@@ -90,9 +93,7 @@ function currentUserID() {
 
 async function logoutAfterCredentialChange(message: string) {
   appStore.showSuccess(message)
-  await new Promise((resolve) => window.setTimeout(resolve, 3000))
   clearAuthSession()
-  window.dispatchEvent(new Event('storage'))
   await router.replace('/login')
 }
 

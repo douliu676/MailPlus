@@ -14,7 +14,12 @@ export function setSessionItem(key: string, value: string) {
 const authStorageKeys = ['auth_token', 'refresh_token', 'auth_user', 'token_expires_at', 'must_change_password'] as const
 type AuthStorageKey = typeof authStorageKeys[number]
 type AuthSession = Partial<Record<AuthStorageKey, string>>
-const authScopedStoragePrefixes = ['mail_receive_cache_v1:', 'outlook_read_cache_v1:']
+const authScopedStoragePrefixes = [
+  'mail_receive_cache_', 'outlook_read_cache_', 'mail_management_cache_', 'outlook_management_cache_',
+  'admin_users_management_cache_', 'dashboard_stats_cache_', 'system_settings_cache_',
+  'proxy_system_cache_', 'card_key_management_cache_', 'card_key_logs_cache_',
+  'card_key_email_picker_available_cache_', 'admin_task_center_tasks_',
+]
 export const authSessionStorageKey = 'auth_session_v1'
 export const authSessionChangedEvent = 'auth-session-changed'
 export const authSessionClearedEvent = 'auth-session-cleared'
@@ -60,11 +65,11 @@ function removeLegacyAuthSession() {
 }
 
 function clearAuthScopedStorage() {
-  Object.keys(localStorage).forEach((key) => {
-    if (authScopedStoragePrefixes.some((prefix) => key.startsWith(prefix))) {
-      localStorage.removeItem(key)
-    }
-  })
+  for (const storage of [localStorage, sessionStorage]) {
+    Object.keys(storage).forEach((key) => {
+      if (authScopedStoragePrefixes.some((prefix) => key.startsWith(prefix))) storage.removeItem(key)
+    })
+  }
 }
 
 export function replaceAuthSession(session: Record<AuthStorageKey, string>) {
@@ -121,6 +126,11 @@ export function getAuthUserRole() {
   }
 }
 
+export function createAuthCacheGuard() {
+  const token = getAuthToken()
+  return () => Boolean(token && getAuthToken() === token && getAuthUserRole() === 'admin')
+}
+
 export function watchAuthSession(listener: () => void) {
   const identity = () => JSON.stringify([getAuthToken(), getAuthUserRole()])
   let previous = identity()
@@ -151,6 +161,9 @@ let authFetchInstalled = false
 export function installAuthFetchInterceptor() {
   if (authFetchInstalled) return
   authFetchInstalled = true
+  // Remove settings cached by older builds, which included the WebDAV password.
+  Object.keys(localStorage).filter((key) => key.startsWith('system_settings_cache_')).forEach((key) => localStorage.removeItem(key))
+  if (!getAuthToken()) clearAuthScopedStorage()
   const rawFetch = window.fetch.bind(window)
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -176,6 +189,23 @@ export function installAuthFetchInterceptor() {
     if (response.status === 401 && shouldAttachAuth && requestToken && sessionRejected && clearAuthSession(true, requestToken)) {
       if (window.location.pathname !== '/login') {
         window.location.replace('/login')
+      }
+    }
+
+    // A successful response from a previous session must not repopulate caches
+    // after logout. Check both headers and completion of delayed response bodies.
+    if (response.ok && shouldAttachAuth && requestToken) {
+      const assertCurrentSession = () => {
+        if (readAuthSession()?.auth_token !== requestToken) throw new DOMException('登录状态已变更', 'AbortError')
+      }
+      assertCurrentSession()
+      for (const method of ['json', 'text', 'blob', 'arrayBuffer', 'formData'] as const) {
+        const readBody = response[method].bind(response)
+        Object.defineProperty(response, method, { value: async () => {
+          const value = await readBody()
+          assertCurrentSession()
+          return value
+        } })
       }
     }
 

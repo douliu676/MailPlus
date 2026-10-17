@@ -146,42 +146,6 @@ type appState struct {
 	backups      *backupScheduler
 }
 
-type authSession struct {
-	UserID    int
-	ExpiresAt time.Time
-}
-
-type sessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]authSession
-}
-
-func newSessionStore() *sessionStore {
-	return &sessionStore{sessions: map[string]authSession{}}
-}
-
-func (s *sessionStore) set(token string, userID int, ttl time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[token] = authSession{UserID: userID, ExpiresAt: time.Now().Add(ttl)}
-}
-
-func (s *sessionStore) get(token string) (authSession, bool) {
-	s.mu.RLock()
-	session, ok := s.sessions[token]
-	s.mu.RUnlock()
-	if !ok {
-		return authSession{}, false
-	}
-	if time.Now().After(session.ExpiresAt) {
-		s.mu.Lock()
-		delete(s.sessions, token)
-		s.mu.Unlock()
-		return authSession{}, false
-	}
-	return session, true
-}
-
 type loginRateLimiter struct {
 	mu       sync.Mutex
 	attempts map[string]loginAttemptState
@@ -301,6 +265,10 @@ func doSafeOutboundHTTP(req *http.Request) (*http.Response, error) {
 }
 
 func safeOutboundDialContext(ctx context.Context, network string, address string) (net.Conn, error) {
+	return dialOutboundHTTPWithIPPolicy(ctx, network, address, isBlockedOutboundIP)
+}
+
+func dialOutboundHTTPWithIPPolicy(ctx context.Context, network string, address string, blocked func(net.IP) bool) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -313,7 +281,7 @@ func safeOutboundDialContext(ctx context.Context, network string, address string
 		return nil, fmt.Errorf("resolve %s: no address", host)
 	}
 	for _, item := range ips {
-		if isBlockedOutboundIP(item.IP) {
+		if blocked(item.IP) {
 			return nil, fmt.Errorf("blocked unsafe outbound address: %s", item.IP.String())
 		}
 	}
@@ -495,9 +463,9 @@ func (s *taskStore) update(id string, update func(*backgroundTask)) {
 	defer db.Close()
 	_, _ = db.Exec(`
 UPDATE background_tasks
-SET status = $2, total = $3, done = $4, success = $5, failed = $6, message = $7, updated_at = NOW()
+SET status = $2, total = $3, done = $4, success = $5, failed = $6, message = $7, result_name = $8, updated_at = NOW()
 WHERE id = $1
-`, task.ID, task.Status, task.Total, task.Done, task.Success, task.Failed, task.Message)
+`, task.ID, task.Status, task.Total, task.Done, task.Success, task.Failed, task.Message, task.FileName)
 }
 
 func (s *taskStore) recordProgress(id string, err error) {
@@ -736,12 +704,12 @@ type userListResponse struct {
 }
 
 type saveUserRequest struct {
-	Username string  `json:"username"`
-	Email    string  `json:"email"`
-	Password string  `json:"password"`
-	Balance  float64 `json:"balance"`
-	Role     string  `json:"role"`
-	Enabled  *bool   `json:"enabled"`
+	Username string   `json:"username"`
+	Email    *string  `json:"email"`
+	Password string   `json:"password"`
+	Balance  *float64 `json:"balance"`
+	Role     string   `json:"role"`
+	Enabled  *bool    `json:"enabled"`
 }
 
 type updateStatusRequest struct {
@@ -1047,10 +1015,6 @@ func main() {
 		panic(fmt.Errorf("seed defaults: %w", err))
 	}
 
-	if err := compactUserIDs(ctx); err != nil {
-		panic(fmt.Errorf("compact user ids: %w", err))
-	}
-
 	if err := ensureSingleAdmin(ctx); err != nil {
 		panic(fmt.Errorf("ensure single admin: %w", err))
 	}
@@ -1081,6 +1045,8 @@ func main() {
 		api.GET("/settings/bootstrap.js", state.getPublicSettingsBootstrap)
 		api.GET("/settings/public", state.getPublicSettings)
 		api.POST("/auth/login", state.login)
+		api.POST("/auth/refresh", state.refreshAuth)
+		api.POST("/auth/logout", state.logout)
 		api.GET("/admin/outlook-oauth/callback", state.outlookOAuthCallback)
 		publicAPI := api.Group("/public")
 		{
@@ -1092,9 +1058,9 @@ func main() {
 		userAPI := api.Group("/user", state.authMiddleware())
 		{
 			userAPI.GET("/profile", state.getProfile)
-			userAPI.PUT("/profile", state.updateProfile)
-			userAPI.GET("/quick-mail-key", state.getQuickMailKey)
-			userAPI.PUT("/quick-mail-key", state.updateQuickMailKey)
+			userAPI.PUT("/profile", state.adminMiddleware(), state.updateProfile)
+			userAPI.GET("/quick-mail-key", state.adminMiddleware(), state.getQuickMailKey)
+			userAPI.PUT("/quick-mail-key", state.adminMiddleware(), state.updateQuickMailKey)
 			userAPI.PUT("/password", state.changePassword)
 		}
 		api.POST("/admin/quick-mail/imap/receive", state.quickMailReceiveIMAP)
@@ -1400,13 +1366,13 @@ func markDefaultPasswordUsersMustChange(ctx context.Context, db *ent.Client) err
 func userMustChangePassword(ctx context.Context, id int) bool {
 	db, err := sql.Open("postgres", databaseURL())
 	if err != nil {
-		return false
+		return true
 	}
 	defer db.Close()
 
 	var mustChange bool
 	if err := db.QueryRowContext(ctx, `SELECT must_change_password FROM users WHERE id = $1`, id).Scan(&mustChange); err != nil {
-		return false
+		return true
 	}
 	return mustChange
 }
@@ -1450,7 +1416,8 @@ func (s *appState) getAdminSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u8bfb\u53d6\u7cfb\u7edf\u8bbe\u7f6e\u5931\u8d25"})
 		return
 	}
-	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: settings, Msg: "ok"})
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: redactAdminSettings(settings), Msg: "ok"})
 }
 
 func (s *appState) updateAdminSettings(c *gin.Context) {
@@ -1461,8 +1428,15 @@ func (s *appState) updateAdminSettings(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	clearPassword, _ := req["backup_webdav_clear_password"].(bool)
+	if clearPassword {
+		req["backup_webdav_password"] = ""
+	}
 	defaults := defaultSystemSettings()
 	for key, value := range req {
+		if key == "backup_webdav_password" && !clearPassword && settingValueToString(value) == "" {
+			continue
+		}
 		if _, ok := defaults[key]; !ok {
 			continue
 		}
@@ -1496,7 +1470,8 @@ func (s *appState) updateAdminSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u8bfb\u53d6\u7cfb\u7edf\u8bbe\u7f6e\u5931\u8d25"})
 		return
 	}
-	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: settings, Msg: "ok"})
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: redactAdminSettings(settings), Msg: "ok"})
 }
 
 func (s *appState) exportDatabaseBackup(c *gin.Context) {
@@ -1518,6 +1493,12 @@ func (s *appState) exportDatabaseBackup(c *gin.Context) {
 	dsn := databaseURL()
 	ctx, cancel := context.WithTimeout(c.Request.Context(), databaseBackupTimeout)
 	defer cancel()
+	release, err := lockDatabaseMaintenance(ctx)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, apiResponse{Code: 503, Msg: "等待其他备份或恢复任务结束失败，请重试"})
+		return
+	}
+	defer release()
 
 	cmd := exec.CommandContext(
 		ctx,
@@ -1530,6 +1511,7 @@ func (s *appState) exportDatabaseBackup(c *gin.Context) {
 		"--file", tempPath,
 		"--dbname", dsn,
 	)
+	configureBackgroundProcess(cmd)
 	cmd.Env = postgresToolEnv(tool)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1568,6 +1550,12 @@ func (s *appState) downloadDatabaseBackupFile(c *gin.Context) {
 }
 
 func (s *appState) deleteDatabaseBackupFile(c *gin.Context) {
+	release, err := lockDatabaseMaintenance(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, apiResponse{Code: 503, Msg: "等待备份任务结束失败，请重试"})
+		return
+	}
+	defer release()
 	filePath, _, ok := resolveDatabaseBackupFile(c.Param("name"))
 	if !ok {
 		c.JSON(http.StatusNotFound, apiResponse{Code: 404, Msg: "备份文件不存在"})
@@ -1581,23 +1569,28 @@ func (s *appState) deleteDatabaseBackupFile(c *gin.Context) {
 }
 
 type databaseBackupTaskRequest struct {
-	RetainCount   int    `json:"backup_schedule_retain_count"`
-	WebDAVEnabled bool   `json:"backup_webdav_enabled"`
-	WebDAVURL     string `json:"backup_webdav_url"`
-	WebDAVUser    string `json:"backup_webdav_username"`
-	WebDAVPass    string `json:"backup_webdav_password"`
-	WebDAVDir     string `json:"backup_webdav_remote_dir"`
+	RetainCount         int    `json:"backup_schedule_retain_count"`
+	WebDAVEnabled       bool   `json:"backup_webdav_enabled"`
+	WebDAVURL           string `json:"backup_webdav_url"`
+	WebDAVUser          string `json:"backup_webdav_username"`
+	WebDAVPass          string `json:"backup_webdav_password"`
+	WebDAVClearPassword bool   `json:"backup_webdav_clear_password"`
+	WebDAVDir           string `json:"backup_webdav_remote_dir"`
 }
 
 func (req databaseBackupTaskRequest) applyTo(settings backupScheduleSettings) backupScheduleSettings {
 	if req.RetainCount > 0 {
 		settings.RetainCount = req.RetainCount
 	}
+	password := req.WebDAVPass
+	if password == "" && !req.WebDAVClearPassword && req.WebDAVURL == settings.WebDAV.URL && req.WebDAVUser == settings.WebDAV.Username {
+		password = settings.WebDAV.Password
+	}
 	settings.WebDAV = webDAVBackupSettings{
 		Enabled:   req.WebDAVEnabled,
 		URL:       req.WebDAVURL,
 		Username:  req.WebDAVUser,
-		Password:  req.WebDAVPass,
+		Password:  password,
 		RemoteDir: req.WebDAVDir,
 	}
 	return settings
@@ -1649,7 +1642,17 @@ func (s *appState) testBackupWebDAV(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
-	if err := testWebDAVBackupStorage(ctx, req.webDAVSettings()); err != nil {
+	settings := req.webDAVSettings()
+	if req.WebDAVPass == "" && !req.WebDAVClearPassword {
+		saved, err := s.readBackupScheduleSettings(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "读取 WebDAV 设置失败"})
+			return
+		}
+		settings = req.applyTo(saved).WebDAV
+		settings.Enabled = true
+	}
+	if err := testWebDAVBackupStorage(ctx, settings); err != nil {
 		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: err.Error()})
 		return
 	}
@@ -1683,6 +1686,12 @@ func (s *appState) restoreDatabaseBackup(c *gin.Context) {
 	dsn := databaseURL()
 	ctx, cancel := context.WithTimeout(c.Request.Context(), databaseRestoreTimeout)
 	defer cancel()
+	release, err := lockDatabaseMaintenance(ctx)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, apiResponse{Code: 503, Msg: "等待其他备份或恢复任务结束失败，请重试"})
+		return
+	}
+	defer release()
 
 	cmd := exec.CommandContext(
 		ctx,
@@ -1695,6 +1704,7 @@ func (s *appState) restoreDatabaseBackup(c *gin.Context) {
 		"--dbname", dsn,
 		tempPath,
 	)
+	configureBackgroundProcess(cmd)
 	cmd.Env = postgresToolEnv(tool)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2039,7 +2049,7 @@ func backupTaskTotal(settings backupScheduleSettings) int {
 func (s *appState) runDatabaseBackupTask(taskID string, settings backupScheduleSettings) {
 	s.tasks.update(taskID, func(task *backgroundTask) {
 		task.Total = backupTaskTotal(settings)
-		task.Message = "正在生成本地备份"
+		task.Message = "等待备份并生成文件"
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), databaseBackupTimeout)
 	defer cancel()
@@ -2049,6 +2059,7 @@ func (s *appState) runDatabaseBackupTask(taskID string, settings backupScheduleS
 		fmt.Printf("database backup failed: %v\n", err)
 		return
 	}
+	s.tasks.update(taskID, func(task *backgroundTask) { task.FileName = result.Filename })
 	if settings.WebDAV.Enabled {
 		if result.WebDAVError != nil {
 			message := fmt.Sprintf("本地备份已保存，WebDAV 上传失败: %v", result.WebDAVError)
@@ -2081,31 +2092,6 @@ func (s *appState) runDatabaseBackupTask(taskID string, settings backupScheduleS
 	s.tasks.finish(taskID)
 }
 
-func createScheduledDatabaseBackup(ctx context.Context, settings backupScheduleSettings) (databaseBackupRunResult, error) {
-	outputDir := backupStorageDir()
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return databaseBackupRunResult{}, err
-	}
-	filename := fmt.Sprintf("mailplus-db-backup-%s.dump", time.Now().Format("20060102-150405"))
-	outputPath := filepath.Join(outputDir, filename)
-	if err := dumpDatabaseToFile(ctx, outputPath); err != nil {
-		_ = os.Remove(outputPath)
-		return databaseBackupRunResult{}, err
-	}
-	cleanupLocalDatabaseBackups(clampInt(settings.RetainCount, 1, 365))
-	result := databaseBackupRunResult{LocalPath: outputPath, Filename: filename}
-	if settings.WebDAV.Enabled {
-		if err := uploadBackupToWebDAV(ctx, settings.WebDAV, outputPath, filename); err != nil {
-			result.WebDAVError = err
-			return result, nil
-		}
-		if err := cleanupWebDAVDatabaseBackups(ctx, settings.WebDAV, clampInt(settings.RetainCount, 1, 365)); err != nil {
-			result.WebDAVError = err
-		}
-	}
-	return result, nil
-}
-
 func dumpDatabaseToFile(ctx context.Context, outputPath string) error {
 	tool, err := postgresToolPath("pg_dump")
 	if err != nil {
@@ -2123,6 +2109,7 @@ func dumpDatabaseToFile(ctx context.Context, outputPath string) error {
 		"--file", outputPath,
 		"--dbname", dsn,
 	)
+	configureBackgroundProcess(cmd)
 	cmd.Env = postgresToolEnv(tool)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2139,7 +2126,7 @@ func cleanupLocalDatabaseBackups(retainCount int) {
 	}
 	files := make([]databaseBackupFileResponse, 0)
 	for _, entry := range entries {
-		if entry.IsDir() || !isDatabaseBackupFile(entry.Name()) {
+		if entry.IsDir() || !isManagedDatabaseBackupFile(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -2149,8 +2136,8 @@ func cleanupLocalDatabaseBackups(retainCount int) {
 		files = append(files, databaseBackupFileResponse{
 			Name:       entry.Name(),
 			Size:       info.Size(),
-			CreatedAt:  info.ModTime().Format(time.RFC3339),
-			ModifiedAt: info.ModTime().Format(time.RFC3339),
+			CreatedAt:  info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z07:00"),
+			ModifiedAt: info.ModTime().UTC().Format("2006-01-02T15:04:05.000000000Z07:00"),
 			Directory:  dir,
 		})
 	}
@@ -2194,7 +2181,7 @@ func uploadBackupToWebDAV(ctx context.Context, settings webDAVBackupSettings, lo
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := doSafeOutboundHTTP(req)
+	response, err := doWebDAVBackupHTTP(req)
 	if err != nil {
 		return err
 	}
@@ -2227,7 +2214,7 @@ func testWebDAVBackupStorage(ctx context.Context, settings webDAVBackupSettings)
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := doSafeOutboundHTTP(req)
+	response, err := doWebDAVBackupHTTP(req)
 	if err != nil {
 		return err
 	}
@@ -2310,7 +2297,7 @@ func listWebDAVDatabaseBackups(ctx context.Context, settings webDAVBackupSetting
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := doSafeOutboundHTTP(req)
+	response, err := doWebDAVBackupHTTP(req)
 	if err != nil {
 		return nil, err
 	}
@@ -2376,7 +2363,7 @@ func deleteWebDAVFile(ctx context.Context, settings webDAVBackupSettings, filena
 	if settings.Username != "" || settings.Password != "" {
 		req.SetBasicAuth(settings.Username, settings.Password)
 	}
-	response, err := doSafeOutboundHTTP(req)
+	response, err := doWebDAVBackupHTTP(req)
 	if err != nil {
 		return err
 	}
@@ -2405,7 +2392,7 @@ func ensureWebDAVDirectory(ctx context.Context, baseURL string, settings webDAVB
 		if settings.Username != "" || settings.Password != "" {
 			req.SetBasicAuth(settings.Username, settings.Password)
 		}
-		response, err := doSafeOutboundHTTP(req)
+		response, err := doWebDAVBackupHTTP(req)
 		if err != nil {
 			return err
 		}
@@ -2418,6 +2405,7 @@ func ensureWebDAVDirectory(ctx context.Context, baseURL string, settings webDAVB
 			continue
 		}
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		response.Body.Close()
 		return fmt.Errorf("WebDAV 创建目录失败: %s %s", response.Status, strings.TrimSpace(string(body)))
 	}
 
@@ -2948,7 +2936,7 @@ func (s *appState) login(c *gin.Context) {
 	}
 
 	admin, err := s.db.User.Query().Where(user.Username(account)).Only(c.Request.Context())
-	if err != nil || !admin.Enabled {
+	if err != nil || !admin.Enabled || admin.Role != "admin" {
 		s.loginLimiter.recordFailure(clientIP, account)
 		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8d26\u53f7\u6216\u5bc6\u7801\u9519\u8bef"})
 		return
@@ -2961,34 +2949,9 @@ func (s *appState) login(c *gin.Context) {
 	}
 	s.loginLimiter.recordSuccess(clientIP, account)
 
-	accessToken := newToken()
-	refreshToken := newToken()
-	expiresIn := int((2 * time.Hour).Seconds())
-	s.sessions.set(accessToken, admin.ID, time.Duration(expiresIn)*time.Second)
-	s.sessions.set(refreshToken, admin.ID, 24*time.Hour)
-	mustChangePassword := userMustChangePassword(c.Request.Context(), admin.ID)
-
-	c.JSON(http.StatusOK, apiResponse{
-		Code: 0,
-		Data: authResponse{
-			AccessToken:        accessToken,
-			RefreshToken:       refreshToken,
-			ExpiresIn:          expiresIn,
-			TokenType:          "Bearer",
-			MustChangePassword: mustChangePassword,
-			User: authUser{
-				ID:        admin.ID,
-				Username:  admin.Username,
-				Email:     admin.Email,
-				AvatarURL: admin.AvatarURL,
-				Balance:   admin.Balance,
-				Role:      admin.Role,
-				Status:    userStatus(admin),
-				CreatedAt: admin.CreatedAt.Format(time.RFC3339),
-			},
-		},
-		Msg: "ok",
-	})
+	accessToken, refreshToken := s.sessions.issue(admin)
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: authPayload(admin, accessToken, refreshToken, userMustChangePassword(c.Request.Context(), admin.ID)), Msg: "ok"})
 }
 
 func (s *appState) getProfile(c *gin.Context) {
@@ -3031,6 +2994,9 @@ func (s *appState) updateProfile(c *gin.Context) {
 		return
 	}
 
+	if current.Username != item.Username {
+		s.sessions.revokeUser(current.ID)
+	}
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: toAuthUser(item), Msg: "ok"})
 }
 
@@ -3045,12 +3011,8 @@ func (s *appState) changePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u8bf7\u6c42\u53c2\u6570\u9519\u8bef"})
 		return
 	}
-	if len(req.NewPassword) < 8 {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u5bc6\u7801\u81f3\u5c11\u9700\u8981 8 \u4e2a\u5b57\u7b26"})
-		return
-	}
-	if req.NewPassword == defaultAdminPassword {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "New password cannot use the default initial password"})
+	if err := validateNewPassword(req.NewPassword); err != nil {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(current.PasswordHash), []byte(req.OldPassword)); err != nil {
@@ -3063,15 +3025,30 @@ func (s *appState) changePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u5bc6\u7801\u4fee\u6539\u5931\u8d25"})
 		return
 	}
-	if _, err := current.Update().SetPasswordHash(string(hash)).Save(c.Request.Context()); err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u5bc6\u7801\u4fee\u6539\u5931\u8d25"})
+	initialChange := userMustChangePassword(c.Request.Context(), current.ID)
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "密码修改失败"})
 		return
 	}
-	if err := setMustChangePassword(c.Request.Context(), current.ID, false); err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u5bc6\u7801\u4fee\u6539\u5931\u8d25"})
+	defer db.Close()
+	result, err := db.ExecContext(c.Request.Context(), `UPDATE users SET password_hash=$1, must_change_password=FALSE, updated_at=NOW() WHERE id=$2 AND password_hash=$3 AND enabled=TRUE`, string(hash), current.ID, current.PasswordHash)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "密码修改失败"})
 		return
 	}
-
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		writeSessionError(c, errInvalidSession)
+		return
+	}
+	s.sessions.revokeUser(current.ID)
+	if initialChange {
+		current.PasswordHash = string(hash)
+		access, refresh := s.sessions.issue(current)
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, apiResponse{Code: 0, Data: authPayload(current, access, refresh, false), Msg: "ok"})
+		return
+	}
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Msg: "ok"})
 }
 
@@ -3160,114 +3137,6 @@ func (s *appState) listUsers(c *gin.Context) {
 
 func (s *appState) createUser(c *gin.Context) {
 	c.JSON(http.StatusForbidden, apiResponse{Code: 403, Msg: "User creation is disabled"})
-}
-
-func createUserWithReusableID(ctx context.Context, username, email, passwordHash string, balance float64, role string, enabled bool) (*ent.User, error) {
-	db, err := sql.Open("postgres", databaseURL())
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	now := time.Now()
-	var item ent.User
-	err = tx.QueryRowContext(ctx, `
-WITH next_id AS (
-	SELECT COALESCE(
-		(
-			SELECT MIN(candidate)
-			FROM generate_series(1, COALESCE((SELECT MAX(id) FROM users), 0) + 1) AS candidate
-			WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = candidate)
-		),
-		1
-	) AS id
-),
-inserted AS (
-	INSERT INTO users (id, username, email, password_hash, balance, role, enabled, created_at, updated_at)
-	SELECT id, $1, $2, $3, $4, $5, $6, $7, $7 FROM next_id
-	RETURNING id, username, email, avatar_url, balance, password_hash, role, enabled, created_at, updated_at
-)
-SELECT id, username, COALESCE(email, ''), COALESCE(avatar_url, ''), balance, password_hash, role, enabled, created_at, updated_at
-FROM inserted
-`, username, email, passwordHash, balance, role, enabled, now).Scan(
-		&item.ID,
-		&item.Username,
-		&item.Email,
-		&item.AvatarURL,
-		&item.Balance,
-		&item.PasswordHash,
-		&item.Role,
-		&item.Enabled,
-		&item.CreatedAt,
-		&item.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1), true)`); err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	return &item, nil
-}
-
-func compactUserIDs(ctx context.Context) error {
-	db, err := sql.Open("postgres", databaseURL())
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx, `
-WITH ordered AS (
-	SELECT id AS old_id, row_number() OVER (ORDER BY id) AS new_id
-	FROM users
-)
-UPDATE balance_records r
-SET user_id = ordered.new_id
-FROM ordered
-WHERE r.user_id = ordered.old_id
-`); err != nil {
-		return err
-	}
-
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET id = -id`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `
-WITH ordered AS (
-	SELECT id, row_number() OVER (ORDER BY -id) AS new_id
-	FROM users
-)
-UPDATE users u
-SET id = ordered.new_id
-FROM ordered
-WHERE u.id = ordered.id
-`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('users', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM users), 1), 1), true)`); err != nil {
-		return err
-	}
-
-	return tx.Commit()
 }
 
 func ensureSingleAdmin(ctx context.Context) error {
@@ -4407,19 +4276,31 @@ func (s *appState) batchCreateMailAccounts(c *gin.Context) {
 		return
 	}
 
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "批量添加失败"})
+		return
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "批量添加失败"})
+		return
+	}
+	defer tx.Rollback()
 	lines := strings.Split(req.Content, "\n")
 	items := []mailAccountResponse{}
-	for _, rawLine := range lines {
+	for lineIndex, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
 			continue
 		}
 		parts := strings.Split(line, "----")
 		if len(parts) != 2 {
-			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "批量邮箱格式错误，请使用 账号----密码"})
+			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: fmt.Sprintf("第 %d 行格式错误，请使用 账号----密码；本批未保存", lineIndex+1)})
 			return
 		}
-		item, err := createMailAccountRecord(c.Request.Context(), saveMailAccountRequest{
+		item, err := createMailAccountWithDB(c.Request.Context(), tx, saveMailAccountRequest{
 			Email:        strings.TrimSpace(parts[0]),
 			Password:     strings.TrimSpace(parts[1]),
 			GroupID:      req.GroupID,
@@ -4434,7 +4315,7 @@ func (s *appState) batchCreateMailAccounts(c *gin.Context) {
 			SMTPSSL:      req.SMTPSSL,
 		})
 		if err != nil {
-			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
+			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: fmt.Sprintf("第 %d 行：%s；本批未保存", lineIndex+1, err.Error())})
 			return
 		}
 		items = append(items, item)
@@ -4444,6 +4325,10 @@ func (s *appState) batchCreateMailAccounts(c *gin.Context) {
 		return
 	}
 
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "批量保存失败，本批未保存"})
+		return
+	}
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: items, Msg: "ok"})
 }
 
@@ -4696,7 +4581,12 @@ func (s *appState) receiveMailDetail(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "邮箱账号不存在"})
 		return
 	}
-	detail, err := receiveIMAPMailDetail(c.Request.Context(), account, req.Mailbox, req.Folder, req.UID)
+	var detail receiveMailDetailResponse
+	if strings.EqualFold(account.ImapProtocol, "POP3") {
+		detail, err = receivePOP3MailDetail(c.Request.Context(), account, req.UID)
+	} else {
+		detail, err = receiveIMAPMailDetail(c.Request.Context(), account, req.Mailbox, req.Folder, req.UID)
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "读取邮件失败: " + err.Error()})
 		return
@@ -6494,6 +6384,15 @@ func (a *smtpLoginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 }
 
 func createMailAccountRecord(ctx context.Context, req saveMailAccountRequest) (mailAccountResponse, error) {
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		return mailAccountResponse{}, err
+	}
+	defer db.Close()
+	return createMailAccountWithDB(ctx, db, req)
+}
+
+func createMailAccountWithDB(ctx context.Context, db accountQuerier, req saveMailAccountRequest) (mailAccountResponse, error) {
 	item := mailAccountResponse{}
 	req.Email = strings.TrimSpace(req.Email)
 	req.Password = strings.TrimSpace(req.Password)
@@ -6524,12 +6423,6 @@ func createMailAccountRecord(ctx context.Context, req saveMailAccountRequest) (m
 		req.SMTPPort = 465
 	}
 
-	db, err := sql.Open("postgres", databaseURL())
-	if err != nil {
-		return item, fmt.Errorf("保存邮箱失败")
-	}
-	defer db.Close()
-
 	if !mailGroupExists(ctx, db, req.GroupID) {
 		return item, fmt.Errorf("邮箱分组不存在")
 	}
@@ -6547,7 +6440,7 @@ func createMailAccountRecord(ctx context.Context, req saveMailAccountRequest) (m
 	}
 
 	var createdAt time.Time
-	err = db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 INSERT INTO mail_accounts (group_id, server_id, email, password, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl, smtp_protocol, smtp_port, smtp_ssl, remark, status)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active')
 RETURNING id, created_at
@@ -6580,7 +6473,7 @@ RETURNING id, created_at
 	return item, nil
 }
 
-func mailGroupExists(ctx context.Context, db *sql.DB, id int) bool {
+func mailGroupExists(ctx context.Context, db accountQuerier, id int) bool {
 	var exists bool
 	return db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM mail_groups WHERE id = $1)`, id).Scan(&exists) == nil && exists
 }
@@ -6598,7 +6491,7 @@ func mailGroupParentID(ctx context.Context, db *sql.DB, id int) int {
 	return parentID
 }
 
-func mailGroupHasChildren(ctx context.Context, db *sql.DB, id int) bool {
+func mailGroupHasChildren(ctx context.Context, db accountQuerier, id int) bool {
 	var exists bool
 	return db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM mail_groups WHERE parent_id = $1)`, id).Scan(&exists) == nil && exists
 }
@@ -6620,30 +6513,20 @@ func (s *appState) updateUser(c *gin.Context) {
 		return
 	}
 
-	update := s.db.User.UpdateOneID(id)
-	if req.Username != "" {
-		update.SetUsername(req.Username)
-	}
-	update.SetEmail(req.Email)
-	update.SetBalance(req.Balance)
-	if req.Enabled != nil {
-		update.SetEnabled(*req.Enabled)
-	}
-	if req.Password != "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u66f4\u65b0\u7528\u6237\u5931\u8d25"})
-			return
-		}
-		update.SetPasswordHash(string(hash))
-	}
-
-	item, err := update.Save(c.Request.Context())
+	db, err := sql.Open("postgres", databaseURL())
 	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u66f4\u65b0\u7528\u6237\u5931\u8d25"})
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "更新用户失败"})
 		return
 	}
-
+	defer db.Close()
+	item, revoke, err := saveManagedUser(c.Request.Context(), db, id, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
+		return
+	}
+	if revoke {
+		s.sessions.revokeUser(id)
+	}
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: toAdminUser(item), Msg: "ok"})
 }
 
@@ -6659,13 +6542,29 @@ func (s *appState) updateUserStatus(c *gin.Context) {
 		return
 	}
 
+	if req.Status != "active" && req.Status != "disabled" {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "账号状态不正确"})
+		return
+	}
+	current, err := s.db.User.Get(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "用户不存在"})
+		return
+	}
 	enabled := req.Status != "disabled"
+	if err := canSetUserEnabled(current, enabled); err != nil {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
+		return
+	}
 	item, err := s.db.User.UpdateOneID(id).SetEnabled(enabled).Save(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u66f4\u65b0\u7528\u6237\u72b6\u6001\u5931\u8d25"})
 		return
 	}
 
+	if !enabled {
+		s.sessions.revokeUser(id)
+	}
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: toAdminUser(item), Msg: "ok"})
 }
 
@@ -6680,51 +6579,22 @@ func (s *appState) updateUserBalance(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u8bf7\u6c42\u53c2\u6570\u9519\u8bef"})
 		return
 	}
-	if req.Amount <= 0 {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u91d1\u989d\u5fc5\u987b\u5927\u4e8e 0"})
-		return
-	}
-
-	current, err := s.db.User.Get(c.Request.Context(), id)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u7528\u6237\u4e0d\u5b58\u5728"})
-		return
-	}
-
-	next := current.Balance + req.Amount
-	if req.Type == "deduct" {
-		next = current.Balance - req.Amount
-	}
-	if next < 0 {
-		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u4f59\u989d\u4e0d\u8db3"})
-		return
-	}
-
-	item, err := current.Update().SetBalance(next).Save(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u4f59\u989d\u66f4\u65b0\u5931\u8d25"})
-		return
-	}
-	if err := saveBalanceRecord(c.Request.Context(), id, req.Type, req.Amount, next, req.Remark); err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "\u4f59\u989d\u8bb0\u5f55\u4fdd\u5b58\u5931\u8d25"})
-		return
-	}
-
-	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: toAdminUser(item), Msg: "ok"})
-}
-
-func saveBalanceRecord(ctx context.Context, userID int, recordType string, amount float64, balanceAfter float64, remark string) error {
 	db, err := sql.Open("postgres", databaseURL())
 	if err != nil {
-		return err
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "余额更新失败"})
+		return
 	}
 	defer db.Close()
-
-	_, err = db.ExecContext(ctx, `
-INSERT INTO balance_records (user_id, type, amount, balance_after, remark, created_at)
-VALUES ($1, $2, $3, $4, $5, $6)
-`, userID, recordType, amount, balanceAfter, strings.TrimSpace(remark), time.Now())
-	return err
+	if _, err := updateBalanceAtomically(c.Request.Context(), db, id, req); err != nil {
+		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
+		return
+	}
+	item, err := s.db.User.Get(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "余额更新失败"})
+		return
+	}
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: toAdminUser(item), Msg: "ok"})
 }
 
 func (s *appState) listUserBalanceRecords(c *gin.Context) {
@@ -6807,15 +6677,16 @@ func (s *appState) deleteUser(c *gin.Context) {
 		return
 	}
 
-	if err := deleteUserAndCompactIDs(c.Request.Context(), id); err != nil {
+	if err := deleteUserRecord(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "\u5220\u9664\u7528\u6237\u5931\u8d25"})
 		return
 	}
 
+	s.sessions.revokeUser(id)
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Msg: "ok"})
 }
 
-func deleteUserAndCompactIDs(ctx context.Context, id int) error {
+func deleteUserRecord(ctx context.Context, id int) error {
 	db, err := sql.Open("postgres", databaseURL())
 	if err != nil {
 		return err
@@ -6841,19 +6712,6 @@ func deleteUserAndCompactIDs(ctx context.Context, id int) error {
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM balance_records WHERE user_id = $1`, id); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE balance_records SET user_id = user_id - 1 WHERE user_id > $1`, id); err != nil {
-		return err
-	}
-
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET id = -id WHERE id > $1`, id); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET id = (-id) - 1 WHERE id < 0`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('users', 'id'), GREATEST(COALESCE((SELECT MAX(id) FROM users), 1), 1), true)`); err != nil {
 		return err
 	}
 
@@ -7453,13 +7311,14 @@ func (s *appState) authMiddleware() gin.HandlerFunc {
 
 		token := strings.TrimSpace(header[len("Bearer "):])
 		session, ok := s.sessions.get(token)
-		if !ok {
+		if !ok || session.Kind != accessSession {
 			c.Header(authErrorHeader, authErrorSession)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u767b\u5f55\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55"})
 			return
 		}
 
 		c.Set("user_id", session.UserID)
+		c.Set("auth_session", session)
 		c.Next()
 	}
 }
@@ -7484,20 +7343,18 @@ func (s *appState) adminMiddleware() gin.HandlerFunc {
 }
 
 func (s *appState) currentUser(c *gin.Context) (*ent.User, bool) {
-	idValue, exists := c.Get("user_id")
-	id, ok := idValue.(int)
-	if !exists || !ok || id <= 0 {
-		c.Header(authErrorHeader, authErrorSession)
-		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8bf7\u5148\u767b\u5f55"})
+	value, exists := c.Get("auth_session")
+	session, ok := value.(authSession)
+	if !exists || !ok {
+		writeSessionError(c, errInvalidSession)
 		return nil, false
 	}
-	item, err := s.db.User.Get(c.Request.Context(), id)
+	current, err := s.sessionUser(c.Request.Context(), session)
 	if err != nil {
-		c.Header(authErrorHeader, authErrorSession)
-		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8bf7\u5148\u767b\u5f55"})
+		writeSessionError(c, err)
 		return nil, false
 	}
-	return item, true
+	return current, true
 }
 
 func userStatus(item *ent.User) string {

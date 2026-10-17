@@ -1,4 +1,4 @@
-import { replaceAuthSession } from './session'
+import { clearAuthSession, getAuthToken, replaceAuthSession } from './session'
 
 export type LoginRequest = {
   account: string
@@ -38,13 +38,27 @@ export async function login(credentials: LoginRequest): Promise<LoginResponse> {
     throw new Error(result.msg || '\u767b\u5f55\u5931\u8d25')
   }
 
-  replaceAuthSession({
-    auth_token: result.data.access_token,
-    refresh_token: result.data.refresh_token,
-    auth_user: JSON.stringify(result.data.user),
-    token_expires_at: String(Date.now() + result.data.expires_in * 1000),
-    must_change_password: result.data.must_change_password ? 'true' : 'false',
-  })
+  saveLoginResponse(result.data)
 
   return result.data
+}
+
+export function saveLoginResponse(data: LoginResponse) {
+  replaceAuthSession({
+    auth_token: data.access_token, refresh_token: data.refresh_token,
+    auth_user: JSON.stringify(data.user), token_expires_at: String(Date.now() + data.expires_in * 1000),
+    must_change_password: data.must_change_password ? 'true' : 'false',
+  })
+}
+
+export function logout() {
+  const token = getAuthToken()
+  if (token) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+    void fetch('/api/auth/logout', {
+      method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: controller.signal,
+    }).catch(() => undefined).finally(() => clearTimeout(timer))
+  }
+  clearAuthSession(true, token)
 }

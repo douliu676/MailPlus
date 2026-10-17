@@ -2,7 +2,8 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Eye, EyeOff, Lock, LogOut, ShieldCheck } from 'lucide-vue-next'
-import { clearAuthSession, setAuthSessionItem } from '../api/session'
+import { setAuthSessionItem } from '../api/session'
+import { logout as logoutSession, saveLoginResponse } from '../api/auth'
 import { useAppStore } from '../stores/app'
 
 const router = useRouter()
@@ -46,7 +47,8 @@ async function submit() {
     if (!response.ok || result.code !== 0) {
       throw new Error(result.msg || '密码修改失败')
     }
-    setAuthSessionItem('must_change_password', 'false')
+    if (result.data?.access_token) saveLoginResponse(result.data)
+    else setAuthSessionItem('must_change_password', 'false')
     appStore.showSuccess('密码已修改')
     await router.replace('/admin/dashboard')
   } catch (error) {
@@ -57,7 +59,7 @@ async function submit() {
 }
 
 async function logout() {
-  clearAuthSession()
+  logoutSession()
   await router.replace('/login')
 }
 </script>

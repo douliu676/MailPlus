@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, CircleOff, Download, Globe2, MoreHorizontal, Pencil, Play, Plus, RefreshCw, Search, Trash2, Upload, X, XCircle } from 'lucide-vue-next'
@@ -8,6 +9,7 @@ import { getAdminSettings } from '../api/adminSettings'
 import { createProxyNode, deleteProxyNode, getProxyRuntime, getProxySettings, importProxyNodes, listProxyNodes, testProxyNode, updateProxyNode, updateProxySettings, type ProxyNode, type ProxyNodeListParams, type ProxyNodeListResponse, type ProxyProtocol, type ProxyRuntime, type ProxySettings, type SaveProxyNodePayload } from '../api/proxySystem'
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const fallbackTablePageSize = 10
 const fallbackTablePageSizeOptions = [10, 20, 50, 100]
@@ -153,6 +155,7 @@ function restoreProxySystemCache() {
 }
 
 function saveProxySystemCache() {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(
       proxySystemCacheKey,

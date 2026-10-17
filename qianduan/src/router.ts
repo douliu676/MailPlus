@@ -1,5 +1,5 @@
 ﻿import { createRouter, createWebHistory } from 'vue-router'
-import { getAuthToken, getSessionItem } from './api/session'
+import { clearAuthSession, getAuthToken, getAuthUserRole, getSessionItem } from './api/session'
 
 const Login = () => import('./login.vue')
 const AdminLayout = () => import('./layout/AdminLayout.vue')
@@ -56,6 +56,11 @@ router.beforeEach((to) => {
   const mustChangePassword = getSessionItem('must_change_password') === 'true'
 
   if (!to.meta.public && !token) {
+    return '/login'
+  }
+
+  if (!to.meta.public && token && getAuthUserRole() !== 'admin') {
+    clearAuthSession(true, token)
     return '/login'
   }
 

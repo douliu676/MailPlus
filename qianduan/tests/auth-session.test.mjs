@@ -80,7 +80,7 @@ function browserFixture() {
     }
     const context = createContext({
       window, localStorage: window.localStorage, sessionStorage: window.sessionStorage,
-      Event, EventTarget, CustomEvent, Headers, Request, Response, URL, DOMException,
+      Event, EventTarget, CustomEvent, Headers, Request, Response, URL, DOMException, AbortController,
       setTimeout, clearTimeout, console, fetch: (...args) => window.fetch(...args),
     })
     const modules = new Map()
@@ -132,6 +132,81 @@ function deferred() {
   const promise = new Promise((yes) => { resolve = yes })
   return { promise, resolve }
 }
+
+test('logout clears all management caches while preserving public display preferences', () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/settings')
+  const sensitive = [
+    'mail_management_cache_v1', 'outlook_management_cache_v1', 'admin_users_management_cache_v1',
+    'system_settings_cache_v3', 'dashboard_stats_cache_v1', 'proxy_system_cache_v1',
+    'card_key_management_cache_v1', 'card_key_logs_cache_v1', 'card_key_email_picker_available_cache_v1',
+    'admin_task_center_tasks_v1', 'mail_receive_cache_v1:1', 'outlook_read_cache_v1:1',
+  ]
+  for (const key of sensitive) browser.localValues.set(key, 'synthetic-private-data')
+  browser.localValues.set('mail_public_settings', '{"site_name":"fixture"}')
+  tab.session.clearAuthSession()
+  for (const key of sensitive) assert.equal(browser.localValues.has(key), false, key)
+  assert.equal(browser.localValues.has('mail_public_settings'), true)
+})
+
+test('a departed page cannot save private state into the next login', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/users')
+  const mayWrite = tab.session.createAuthCacheGuard()
+  assert.equal(mayWrite(), true)
+  tab.session.clearAuthSession()
+  assert.equal(mayWrite(), false)
+  await browser.login(tab)
+  assert.equal(mayWrite(), false)
+  assert.equal(tab.session.createAuthCacheGuard()(), true)
+})
+
+test('a successful old request cannot recreate private caches after another login', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/accounts')
+  const held = deferred()
+  tab.respond = () => held.promise
+  tab.session.installAuthFetchInterceptor()
+  const pending = tab.window.fetch('/api/admin/mail-accounts')
+  const rejected = assert.rejects(pending, { name: 'AbortError' })
+  await browser.login(tab)
+  held.resolve(jsonResponse({ code: 0, data: { items: ['old-account'] } }))
+  await rejected
+  assert.equal(tab.session.getAuthToken(), 'fixture-new-session')
+})
+
+test('delayed successful response body is rejected after logout', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/settings')
+  let controller
+  tab.respond = async () => new Response(new ReadableStream({ start(value) { controller = value } }))
+  tab.session.installAuthFetchInterceptor()
+  const response = await tab.window.fetch('/api/admin/settings')
+  const body = response.json()
+  const rejected = assert.rejects(body, { name: 'AbortError' })
+  tab.session.clearAuthSession()
+  controller.enqueue(new TextEncoder().encode('{"code":0,"data":{"site_name":"old"}}'))
+  controller.close()
+  await rejected
+})
+
+test('logout revokes the current server session before discarding local credentials', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/dashboard')
+  const requests = []
+  tab.respond = async (url, init) => {
+    requests.push({ url, method: init.method, token: new Headers(init.headers).get('Authorization') })
+    return jsonResponse({ code: 0 })
+  }
+  tab.auth.logout()
+  assert.equal(tab.session.getAuthToken(), '')
+  assert.deepEqual(requests, [{ url: '/api/auth/logout', method: 'POST', token: 'Bearer fixture-old-session' }])
+})
 
 for (const mode of ['imap', 'outlook']) {
   test('logging in with an open ' + mode + ' reader does not broadcast a logout', async () => {

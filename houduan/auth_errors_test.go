@@ -7,14 +7,17 @@ import (
 	"testing"
 	"time"
 
+	"mail-admin/houduan/ent"
+
 	"github.com/gin-gonic/gin"
 )
 
 func TestSessionUnauthorizedIsDistinctFromQuickMailKeyFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	state := &appState{sessions: newSessionStore()}
-	state.sessions.set("fixture-current-session", 1, time.Hour)
-	state.sessions.set("fixture-expired-session", 1, -time.Second)
+	current := &ent.User{ID: 1, Username: "fixture-admin", PasswordHash: "fixture-hash", Role: "admin", Enabled: true}
+	validToken, _ := state.sessions.issue(current)
+	state.sessions.sessions["fixture-expired-session"] = authSession{UserID: 1, Kind: accessSession, ExpiresAt: time.Now().Add(-time.Second)}
 	engine := gin.New()
 	engine.GET("/api/user/profile", state.authMiddleware(), func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
@@ -36,7 +39,7 @@ func TestSessionUnauthorizedIsDistinctFromQuickMailKeyFailure(t *testing.T) {
 
 	// An old rejected request must not revoke the independently issued current session.
 	request := httptest.NewRequest(http.MethodGet, "/api/user/profile", nil)
-	request.Header.Set("Authorization", "Bearer fixture-current-session")
+	request.Header.Set("Authorization", "Bearer "+validToken)
 	response := httptest.NewRecorder()
 	engine.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || response.Header().Get(authErrorHeader) != "" {

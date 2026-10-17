@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, defineComponent, h, onMounted, ref } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import { RefreshCw, Users, WalletCards } from 'lucide-vue-next'
@@ -20,6 +21,7 @@ type ProfileUser = {
 }
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const dashboardCacheKey = 'dashboard_stats_cache_v1'
 const loading = ref(false)
@@ -107,6 +109,7 @@ function readDashboardCache() {
 }
 
 function saveDashboardCache() {
+  if (!mayWriteSessionCache()) return
   try {
     const value = {
       balance: Number(profile.value.balance || 0),
@@ -139,6 +142,7 @@ async function fetchProfile() {
 }
 
 function applyProfile(nextProfile: ProfileUser) {
+  if (!mayWriteSessionCache()) return
   profile.value = { ...profile.value, ...nextProfile }
   setSessionItem('auth_user', JSON.stringify(profile.value))
   window.dispatchEvent(new Event('storage'))

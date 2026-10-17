@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RefreshCw, Search, Trash2, X } from 'lucide-vue-next'
 import PaginationBar from '../components/PaginationBar.vue'
@@ -23,6 +24,7 @@ type CardKeyLogsCache = {
 }
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const fallbackTablePageSize = 20
 const fallbackTablePageSizeOptions = [10, 20, 50, 100]
 const pageSizeStorageKey = 'card_key_logs_page_size'
@@ -150,6 +152,7 @@ function restoreCardKeyLogsCache() {
 }
 
 function saveCardKeyLogsCache() {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(pageSizeStorageKey, String(pageSize.value))
     localStorage.setItem(

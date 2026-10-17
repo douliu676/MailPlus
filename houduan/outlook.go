@@ -730,19 +730,31 @@ func (s *appState) batchCreateOutlookAccounts(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "请求参数错误"})
 		return
 	}
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "批量添加失败"})
+		return
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "批量添加失败"})
+		return
+	}
+	defer tx.Rollback()
 	lines := strings.Split(req.Content, "\n")
 	items := []outlookAccountResponse{}
-	for _, rawLine := range lines {
+	for lineIndex, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
 			continue
 		}
 		parts := strings.Split(line, "----")
 		if len(parts) < 4 {
-			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "批量格式错误，请使用 邮箱----密码----client_id----refresh_token"})
+			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: fmt.Sprintf("第 %d 行格式错误，请使用 邮箱----密码----client_id----refresh_token；本批未保存", lineIndex+1)})
 			return
 		}
-		item, err := createOutlookAccountRecord(c.Request.Context(), saveOutlookAccountRequest{
+		item, err := createOutlookAccountWithDB(c.Request.Context(), tx, saveOutlookAccountRequest{
 			Email:        strings.TrimSpace(parts[0]),
 			Password:     strings.TrimSpace(parts[1]),
 			ClientID:     strings.TrimSpace(parts[2]),
@@ -750,13 +762,17 @@ func (s *appState) batchCreateOutlookAccounts(c *gin.Context) {
 			GroupID:      req.GroupID,
 		})
 		if err != nil {
-			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: err.Error()})
+			c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: fmt.Sprintf("第 %d 行：%s；本批未保存", lineIndex+1, err.Error())})
 			return
 		}
 		items = append(items, item)
 	}
 	if len(items) == 0 {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "请输入批量账号内容"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "批量保存失败，本批未保存"})
 		return
 	}
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: items, Msg: "ok"})
@@ -1431,6 +1447,15 @@ func (s *appState) outlookOAuthResult(c *gin.Context) {
 }
 
 func createOutlookAccountRecord(ctx context.Context, req saveOutlookAccountRequest) (outlookAccountResponse, error) {
+	db, err := sql.Open("postgres", databaseURL())
+	if err != nil {
+		return outlookAccountResponse{}, err
+	}
+	defer db.Close()
+	return createOutlookAccountWithDB(ctx, db, req)
+}
+
+func createOutlookAccountWithDB(ctx context.Context, db accountQuerier, req saveOutlookAccountRequest) (outlookAccountResponse, error) {
 	var item outlookAccountResponse
 	req.Email = strings.TrimSpace(req.Email)
 	req.Password = strings.TrimSpace(req.Password)
@@ -1449,11 +1474,6 @@ func createOutlookAccountRecord(ctx context.Context, req saveOutlookAccountReque
 	if req.GroupID <= 0 {
 		req.GroupID = 2
 	}
-	db, err := sql.Open("postgres", databaseURL())
-	if err != nil {
-		return item, fmt.Errorf("保存微软邮箱失败")
-	}
-	defer db.Close()
 	if !outlookGroupExists(ctx, db, req.GroupID) {
 		return item, fmt.Errorf("微软邮箱分组不存在")
 	}
@@ -1461,7 +1481,7 @@ func createOutlookAccountRecord(ctx context.Context, req saveOutlookAccountReque
 		return item, fmt.Errorf("该分组下有子分组，不能直接添加邮箱")
 	}
 	var createdAt time.Time
-	err = db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 INSERT INTO outlook_accounts (group_id, email, password, client_id, refresh_token, remark, status)
 VALUES ($1, $2, $3, $4, $5, $6, 'active')
 RETURNING id, created_at
@@ -2330,7 +2350,7 @@ func outlookGroupHasAccountsTx(ctx context.Context, tx *sql.Tx, id int) bool {
 	return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outlook_accounts WHERE group_id = $1)`, id).Scan(&exists) == nil && exists
 }
 
-func outlookGroupExists(ctx context.Context, db *sql.DB, id int) bool {
+func outlookGroupExists(ctx context.Context, db accountQuerier, id int) bool {
 	var exists bool
 	return db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outlook_groups WHERE id = $1)`, id).Scan(&exists) == nil && exists
 }
@@ -2348,7 +2368,7 @@ func outlookGroupParentID(ctx context.Context, db *sql.DB, id int) int {
 	return parentID
 }
 
-func outlookGroupHasChildren(ctx context.Context, db *sql.DB, id int) bool {
+func outlookGroupHasChildren(ctx context.Context, db accountQuerier, id int) bool {
 	var exists bool
 	return db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM outlook_groups WHERE parent_id = $1)`, id).Scan(&exists) == nil && exists
 }

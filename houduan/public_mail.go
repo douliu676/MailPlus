@@ -205,23 +205,12 @@ func (s *appState) fetchPublicMailMessagesForRequest(c *gin.Context, requestedEm
 	defer db.Close()
 
 	ctx := c.Request.Context()
-	record, err := getPublicMailAccessRecord(ctx, db, card.ID, email, clientKey)
+	record, usedCount, wait, err := beginPublicMailRead(ctx, db, card, email, clientKey, clientIP)
 	if err != nil {
-		return publicMailMessagesResponse{}, http.StatusInternalServerError, "获取邮件失败", nil, false
+		return publicMailMessagesResponse{}, http.StatusForbidden, err.Error(), nil, false
 	}
-	if wait := publicMailCooldownWait(record.LastRequestAt); wait > 0 {
+	if wait > 0 {
 		return publicMailMessagesResponse{}, http.StatusTooManyRequests, fmt.Sprintf("请等待 %d 秒后再试", wait), gin.H{"wait_seconds": wait}, false
-	}
-	if err := touchPublicMailAccessRecord(ctx, db, card.ID, email, clientKey, clientIP); err != nil {
-		return publicMailMessagesResponse{}, http.StatusInternalServerError, "获取邮件失败", nil, false
-	}
-
-	usedCount, err := publicMailUsedCountWithDB(ctx, db, card.ID)
-	if err != nil {
-		return publicMailMessagesResponse{}, http.StatusInternalServerError, "获取邮件失败", nil, false
-	}
-	if publicMailRemaining(card, usedCount) <= 0 {
-		return publicMailMessagesResponse{}, http.StatusForbidden, "卡密使用次数已用完", nil, false
 	}
 
 	messages, err := fetchPublicMailMessages(ctx, db, card, email)
@@ -237,8 +226,9 @@ func (s *appState) fetchPublicMailMessagesForRequest(c *gin.Context, requestedEm
 	}
 	charged := false
 	repeated := latestKey != "" && latestKey == record.LastMessageKey
-	if latestKey != "" && !repeated {
+	if latestKey != "" {
 		usedCount, charged, err = chargePublicMailUsage(ctx, db, card, email, clientKey, latestKey, usedCount)
+		repeated = !charged
 		if err != nil {
 			return publicMailMessagesResponse{}, http.StatusForbidden, err.Error(), nil, false
 		}
@@ -615,42 +605,6 @@ ON CONFLICT (card_key_id, email, client_key)
 DO UPDATE SET client_ip = EXCLUDED.client_ip, last_request_at = NOW(), updated_at = NOW()
 `, cardKeyID, email, clientKey, clientIP)
 	return err
-}
-
-func chargePublicMailUsage(ctx context.Context, db *sql.DB, card publicCardKey, email string, clientKey string, latestMessageKey string, usedCount int) (int, bool, error) {
-	if usedCount >= card.UsageLimit {
-		return usedCount, false, fmt.Errorf("卡密使用次数已用完")
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return usedCount, false, fmt.Errorf("记录使用次数失败")
-	}
-	defer tx.Rollback()
-
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(charged_count), 0) FROM card_key_mail_access_records WHERE card_key_id = $1`, card.ID).Scan(&usedCount); err != nil {
-		return usedCount, false, fmt.Errorf("记录使用次数失败")
-	}
-	if usedCount >= card.UsageLimit {
-		return usedCount, false, fmt.Errorf("卡密使用次数已用完")
-	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE card_key_mail_access_records
-SET last_message_key = $4, charged_count = charged_count + 1, updated_at = NOW()
-WHERE card_key_id = $1 AND email = $2 AND client_key = $3
-`, card.ID, email, clientKey, latestMessageKey); err != nil {
-		return usedCount, false, fmt.Errorf("记录使用次数失败")
-	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE card_keys
-SET status = $2, used_by = $3, used_at = COALESCE(used_at, NOW()), updated_at = NOW()
-WHERE id = $1
-`, card.ID, cardKeyStatusUsed, email); err != nil {
-		return usedCount, false, fmt.Errorf("记录使用次数失败")
-	}
-	if err := tx.Commit(); err != nil {
-		return usedCount, false, fmt.Errorf("记录使用次数失败")
-	}
-	return usedCount + 1, true, nil
 }
 
 func publicMailCooldownWait(lastRequest sql.NullTime) int {

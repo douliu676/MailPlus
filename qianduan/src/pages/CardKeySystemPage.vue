@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createAuthCacheGuard } from '../api/session'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Folder, Link, Link2, Pencil, Plus, RefreshCw, Search, Table2, Trash2, Unlink, Upload, X } from 'lucide-vue-next'
@@ -28,6 +29,7 @@ import {
 import { copyToClipboard } from '../utils/clipboard'
 
 const appStore = useAppStore()
+const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const fallbackTablePageSize = 10
 const fallbackTablePageSizeOptions = [10, 20, 50, 100]
@@ -494,6 +496,7 @@ function readEmailPickerAvailableCache(): EmailPickerAvailableCache | null {
 }
 
 function writeEmailPickerAvailableCache(cache: EmailPickerAvailableCache) {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(emailPickerAvailableCacheStorageKey, JSON.stringify({ ...cache, updated_at: Date.now() }))
   } catch {
@@ -725,6 +728,7 @@ function restoreCardKeyManagementCache() {
 }
 
 function saveCardKeyManagementCache() {
+  if (!mayWriteSessionCache()) return
   try {
     localStorage.setItem(
       cardKeyManagementCacheKey,
