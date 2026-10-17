@@ -11,7 +11,7 @@ import { batchCreateOutlookAccounts, batchOutlookAction, createOutlookAccount, c
 import { copyToClipboard } from '../utils/clipboard'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { normalizeOutlookAccountPageCache, outlookAccountPageCacheKey, outlookManagementCacheKey, rememberOutlookAccountPage, type OutlookAccountPageCacheEntry } from '../utils/outlookManagementCache'
-import { authSessionClearedEvent } from '../api/session'
+import { watchAuthSession } from '../api/session'
 
 const appStore = useAppStore()
 const taskStore = useTaskStore()
@@ -579,7 +579,7 @@ onMounted(() => {
   window.addEventListener('message', handleOAuthMessage)
   window.addEventListener('resize', updateOutlookVirtualViewport)
   window.addEventListener('resize', updateGroupNameScrollMax)
-  window.addEventListener(authSessionClearedEvent, clearReadSessionState)
+  stopWatchingAuth = watchAuthSession(clearReadSessionState)
   document.addEventListener('click', closeFloating)
 })
 
@@ -589,7 +589,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('message', handleOAuthMessage)
   window.removeEventListener('resize', updateOutlookVirtualViewport)
   window.removeEventListener('resize', updateGroupNameScrollMax)
-  window.removeEventListener(authSessionClearedEvent, clearReadSessionState)
+  stopWatchingAuth?.()
   document.removeEventListener('click', closeFloating)
 })
 
@@ -1573,6 +1573,8 @@ function clearReadCacheStorage() {
     }
   })
 }
+
+let stopWatchingAuth: (() => void) | undefined
 
 function clearReadSessionState() {
   readDetailRequestID += 1

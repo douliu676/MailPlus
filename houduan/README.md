@@ -91,3 +91,18 @@ npm run build
 ```
 
 上述回归测试使用合成邮件与模拟请求，不需要真实邮箱或数据库。实际服务器的响应时间与连接限制仍需在相应环境验证。
+
+## 多页面登录回归
+
+前端将 token、过期时间和用户资料作为同一条会话记录保存，兼容迁移原有登录状态。收件页收到跨页面通知时读取当前会话；旧请求的 `401` 只会清理该请求对应的会话，不能清理之后重新登录的会话。
+
+后台认证失败仍返回 `401`，并通过 `X-MailPlus-Auth-Error: session` 标识登录失效。快速取件秘钥失败使用 `X-MailPlus-Auth-Error: quick-mail-key`，避免被误判为后台退出登录。
+
+在 `qianduan` 目录运行：
+
+```powershell
+npm run test:auth
+npm run test:auth:browser
+```
+
+浏览器测试会构建前端，启动模拟后端，并在独立浏览器配置中打开 IMAP、Outlook 收件页和后台登录页，验证重新登录及旧请求延迟返回的场景；不使用真实邮箱或数据库。需要安装 Edge/Chromium，也可以通过 `MAILPLUS_BROWSER_EXECUTABLE` 指定浏览器程序路径。

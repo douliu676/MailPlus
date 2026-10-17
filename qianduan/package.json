@@ -7,6 +7,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "test:quick-mail": "node --experimental-strip-types --test tests/quick-mail-api.test.mjs tests/quick-mail-reader.test.mjs",
+    "test:auth": "node --test tests/auth-session.test.mjs",
+    "test:auth:browser": "node --test tests/auth-browser.test.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

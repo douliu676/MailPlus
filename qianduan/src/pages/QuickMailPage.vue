@@ -7,7 +7,7 @@ import PaginationBar from '../components/PaginationBar.vue'
 import SafeMailFrame from '../components/SafeMailFrame.vue'
 import { receiveQuickMail, receiveQuickMailDetail, type QuickMailMessage } from '../api/quickMail'
 import { useQuickMailReader } from '../composables/useQuickMailReader'
-import { authSessionClearedEvent, authSessionClearedStorageKey, clearAuthSession, getAuthToken, getAuthUserRole } from '../api/session'
+import { getAuthToken, getAuthUserRole, watchAuthSession } from '../api/session'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
 import { copyToClipboard } from '../utils/clipboard'
@@ -175,22 +175,14 @@ function applyPublicPageSizeSettings(settings = appStore.cachedPublicSettings.va
   mailPageSize.value = readStoredPageSize(mode.value)
 }
 
+let stopWatchingAuth: (() => void) | undefined
+
 function refreshAuthAvailable() {
   authAvailable.value = Boolean(getAuthToken()) && getAuthUserRole() === 'admin'
 }
 
-function handleAuthSessionCleared() {
-  const wasAuthenticated = authAvailable.value
-  clearAuthSession(false)
-  authAvailable.value = false
-  if (wasAuthenticated) reader.reset()
-}
-
-function handleAuthStorage(event: StorageEvent) {
-  if (event.key === authSessionClearedStorageKey) {
-    handleAuthSessionCleared()
-    return
-  }
+function handleAuthSessionChanged() {
+  reader.reset()
   refreshAuthAvailable()
 }
 
@@ -200,8 +192,7 @@ function isValidQuickMailEmail(value: string) {
 
 onMounted(async () => {
   refreshAuthAvailable()
-  window.addEventListener('storage', handleAuthStorage)
-  window.addEventListener(authSessionClearedEvent, handleAuthSessionCleared)
+  stopWatchingAuth = watchAuthSession(handleAuthSessionChanged)
   applyPublicPageSizeSettings()
   const settings = await appStore.fetchPublicSettings(true)
   applyPublicPageSizeSettings(settings || appStore.cachedPublicSettings.value)
@@ -209,8 +200,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   reader.reset()
-  window.removeEventListener('storage', handleAuthStorage)
-  window.removeEventListener(authSessionClearedEvent, handleAuthSessionCleared)
+  stopWatchingAuth?.()
 })
 
 watch(pageTitle, (title) => {

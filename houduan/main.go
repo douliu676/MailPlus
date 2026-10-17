@@ -7446,6 +7446,7 @@ func (s *appState) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := strings.TrimSpace(c.GetHeader("Authorization"))
 		if !strings.HasPrefix(strings.ToLower(header), "bearer ") {
+			c.Header(authErrorHeader, authErrorSession)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8bf7\u5148\u767b\u5f55"})
 			return
 		}
@@ -7453,6 +7454,7 @@ func (s *appState) authMiddleware() gin.HandlerFunc {
 		token := strings.TrimSpace(header[len("Bearer "):])
 		session, ok := s.sessions.get(token)
 		if !ok {
+			c.Header(authErrorHeader, authErrorSession)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u767b\u5f55\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55"})
 			return
 		}
@@ -7485,11 +7487,13 @@ func (s *appState) currentUser(c *gin.Context) (*ent.User, bool) {
 	idValue, exists := c.Get("user_id")
 	id, ok := idValue.(int)
 	if !exists || !ok || id <= 0 {
+		c.Header(authErrorHeader, authErrorSession)
 		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8bf7\u5148\u767b\u5f55"})
 		return nil, false
 	}
 	item, err := s.db.User.Get(c.Request.Context(), id)
 	if err != nil {
+		c.Header(authErrorHeader, authErrorSession)
 		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "\u8bf7\u5148\u767b\u5f55"})
 		return nil, false
 	}

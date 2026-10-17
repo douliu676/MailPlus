@@ -365,6 +365,7 @@ func (s *appState) authorizeQuickMailRequest(c *gin.Context, key string) bool {
 
 	key = strings.TrimSpace(key)
 	if key == "" {
+		c.Header(authErrorHeader, authErrorQuickMailKey)
 		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "请输入秘钥"})
 		return false
 	}
@@ -374,6 +375,7 @@ func (s *appState) authorizeQuickMailRequest(c *gin.Context, key string) bool {
 		return false
 	}
 	if !matched {
+		c.Header(authErrorHeader, authErrorQuickMailKey)
 		c.JSON(http.StatusUnauthorized, apiResponse{Code: 401, Msg: "秘钥错误"})
 		return false
 	}
@@ -383,6 +385,7 @@ func (s *appState) authorizeQuickMailRequest(c *gin.Context, key string) bool {
 func (s *appState) authorizeQuickMailPlainRequest(c *gin.Context, key string) bool {
 	key = strings.TrimSpace(key)
 	if key == "" {
+		c.Header(authErrorHeader, authErrorQuickMailKey)
 		writeQuickMailPlain(c, http.StatusUnauthorized, "请输入秘钥")
 		return false
 	}
@@ -392,6 +395,7 @@ func (s *appState) authorizeQuickMailPlainRequest(c *gin.Context, key string) bo
 		return false
 	}
 	if !matched {
+		c.Header(authErrorHeader, authErrorQuickMailKey)
 		writeQuickMailPlain(c, http.StatusUnauthorized, "秘钥错误")
 		return false
 	}

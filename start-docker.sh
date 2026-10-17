@@ -5,6 +5,15 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
 
+if [ "${1:-}" = "--build" ]; then
+  for source_file in Dockerfile houduan/go.mod houduan/main.go qianduan/package-lock.json qianduan/src/main.ts; do
+    if [ ! -f "$SCRIPT_DIR/$source_file" ]; then
+      printf '缺少本地构建所需文件：%s。请先下载完整 Docker 源码再使用 --build。\n' "$source_file" >&2
+      exit 1
+    fi
+  done
+fi
+
 generate_password() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | cut -c1-32

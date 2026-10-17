@@ -12,7 +12,7 @@ import { batchCreateMailAccounts, batchMailAction, createMailAccount, createMail
 import { copyToClipboard } from '../utils/clipboard'
 import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { mailAccountPageCacheKey, mailManagementCacheKey, normalizeMailAccountPageCache, rememberMailAccountPage, type MailAccountPageCacheEntry } from '../utils/mailManagementCache'
-import { authSessionClearedEvent } from '../api/session'
+import { watchAuthSession } from '../api/session'
 
 const appStore = useAppStore()
 const taskStore = useTaskStore()
@@ -1373,6 +1373,8 @@ function clearReceiveCacheStorage() {
   })
 }
 
+let stopWatchingAuth: (() => void) | undefined
+
 function clearReceiveSessionState() {
   receiveDetailRequestID += 1
   receiveWarmupRunID += 1
@@ -1903,7 +1905,7 @@ onMounted(async () => {
   updateGroupNameScrollMax()
   window.addEventListener('resize', updateMailColumnDividers)
   window.addEventListener('resize', updateGroupNameScrollMax)
-  window.addEventListener(authSessionClearedEvent, clearReceiveSessionState)
+  stopWatchingAuth = watchAuthSession(clearReceiveSessionState)
   document.addEventListener('click', handleClickOutside)
 })
 
@@ -1911,7 +1913,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(accountSearchTimer)
   window.removeEventListener('resize', updateMailColumnDividers)
   window.removeEventListener('resize', updateGroupNameScrollMax)
-  window.removeEventListener(authSessionClearedEvent, clearReceiveSessionState)
+  stopWatchingAuth?.()
   document.removeEventListener('click', handleClickOutside)
 })
 </script>

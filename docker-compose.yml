@@ -28,6 +28,10 @@ services:
     container_name: mail
     # 使用 Docker Hub 上已发布的 MailPlus 镜像；升级时改成新的版本号。
     image: douliu676/mailplus:1.0.1
+    # 使用 --build 时从本目录源码重新构建应用镜像。
+    build:
+      context: .
+      dockerfile: Dockerfile
     # 容器异常退出或 Docker 重启后自动恢复，手动停止除外。
     restart: unless-stopped
     # 端口映射：冒号左边是宿主机端口，冒号右边是容器内部端口。

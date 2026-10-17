@@ -1,4 +1,4 @@
-import { clearAuthSession, setAuthSessionItem } from './session'
+import { replaceAuthSession } from './session'
 
 export type LoginRequest = {
   account: string
@@ -38,12 +38,13 @@ export async function login(credentials: LoginRequest): Promise<LoginResponse> {
     throw new Error(result.msg || '\u767b\u5f55\u5931\u8d25')
   }
 
-  clearAuthSession()
-  setAuthSessionItem('auth_token', result.data.access_token)
-  setAuthSessionItem('refresh_token', result.data.refresh_token)
-  setAuthSessionItem('auth_user', JSON.stringify(result.data.user))
-  setAuthSessionItem('token_expires_at', String(Date.now() + result.data.expires_in * 1000))
-  setAuthSessionItem('must_change_password', result.data.must_change_password ? 'true' : 'false')
+  replaceAuthSession({
+    auth_token: result.data.access_token,
+    refresh_token: result.data.refresh_token,
+    auth_user: JSON.stringify(result.data.user),
+    token_expires_at: String(Date.now() + result.data.expires_in * 1000),
+    must_change_password: result.data.must_change_password ? 'true' : 'false',
+  })
 
   return result.data
 }
