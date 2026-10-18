@@ -8,6 +8,7 @@ import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { build } from 'vite'
+import { connectDebugger, waitFor } from './helpers/browser.mjs'
 
 const frontendRoot = fileURLToPath(new URL('../', import.meta.url))
 const browserExecutable = [
@@ -16,61 +17,6 @@ const browserExecutable = [
   join(process.env.PROGRAMFILES || '', 'Google/Chrome/Application/chrome.exe'),
   '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome',
 ].find((path) => path && existsSync(path))
-
-async function waitFor(check, description, timeout = 15_000) {
-  const deadline = Date.now() + timeout
-  while (Date.now() < deadline) {
-    if (await check()) return
-    await delay(100)
-  }
-  throw new Error('Timed out waiting for ' + description)
-}
-
-async function connectDebugger(url) {
-  const socket = new WebSocket(url)
-  const pending = new Map()
-  const exceptions = []
-  let nextID = 0
-  await new Promise((yes, no) => {
-    socket.addEventListener('open', yes, { once: true })
-    socket.addEventListener('error', no, { once: true })
-  })
-  socket.addEventListener('message', (event) => {
-    const message = JSON.parse(String(event.data))
-    if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails.text)
-    const waiting = pending.get(message.id)
-    if (!waiting) return
-    pending.delete(message.id)
-    clearTimeout(waiting.timer)
-    if (message.error) waiting.reject(new Error(message.error.message))
-    else waiting.resolve(message.result)
-  })
-  const send = (method, params = {}, sessionId) => new Promise((yes, no) => {
-    const id = ++nextID
-    const timer = setTimeout(() => { pending.delete(id); no(new Error('CDP timeout: ' + method)) }, 10_000)
-    pending.set(id, { resolve: yes, reject: no, timer })
-    socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
-  })
-  const evaluate = async (sessionId, expression) => {
-    const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId)
-    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails))
-    return result.result.value
-  }
-  return {
-    send, evaluate, exceptions,
-    async page(url) {
-      const { targetId } = await send('Target.createTarget', { url })
-      const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
-      await send('Runtime.enable', {}, sessionId)
-      return sessionId
-    },
-    close() {
-      for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Debugger closed')) }
-      pending.clear()
-      socket.close()
-    },
-  }
-}
 
 test('backend login survives open IMAP/Outlook pages and a delayed previous-session 401', {
   timeout: 90_000,
@@ -184,14 +130,14 @@ test('backend login survives open IMAP/Outlook pages and a delayed previous-sess
   await waitFor(() => loginCount === 1, 'first login response')
   await assertStillSignedIn(firstAdmin)
 
-  await evaluate(readers[0], 'window.fixtureDelayedStatus = "pending"; fetch("/api/user/fixture-delayed").then(response => { window.fixtureDelayedStatus = response.status }); true')
+  await evaluate(readers[0], 'window.fixtureDelayedStatus = "pending"; fetch("/api/user/fixture-delayed").then(response => { window.fixtureDelayedStatus = response.status }).catch(error => { window.fixtureDelayedStatus = error.name }); true')
   await waitFor(() => !!heldResponse, 'old in-flight request')
   activeToken = ''
   const secondAdmin = await signIn()
   await waitFor(() => loginCount === 2, 'login after session expiry')
   sendJSON(heldResponse, null, 401, { 'X-MailPlus-Auth-Error': 'session' })
   heldResponse = undefined
-  await waitFor(() => evaluate(readers[0], 'window.fixtureDelayedStatus === 401'), 'old 401 response')
+  await waitFor(() => evaluate(readers[0], 'window.fixtureDelayedStatus === 401 || window.fixtureDelayedStatus === "AbortError"'), 'old request cancelled or rejected')
   await assertStillSignedIn(secondAdmin)
   assert.deepEqual(debuggerClient.exceptions, [], 'browser must not report uncaught application exceptions')
 })

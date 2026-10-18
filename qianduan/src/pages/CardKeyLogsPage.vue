@@ -23,7 +23,7 @@ type CardKeyLogsCache = {
   updated_at?: number
 }
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const fallbackTablePageSize = 20
 const fallbackTablePageSizeOptions = [10, 20, 50, 100]

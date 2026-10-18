@@ -40,7 +40,7 @@ watch(
 </script>
 
 <template>
-  <RouterView :key="route.path.startsWith('/admin') ? sessionViewKey : ''" />
+  <RouterView v-if="route.meta.public || sessionViewKey" :key="route.path.startsWith('/admin') ? sessionViewKey : ''" />
   <ConfirmDialog />
   <Toast />
 </template>

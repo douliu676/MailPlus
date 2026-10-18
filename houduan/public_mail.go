@@ -653,6 +653,7 @@ func fetchPublicMailMessages(ctx context.Context, db *sql.DB, card publicCardKey
 			}
 		}
 		sortPublicMailMessages(items)
+		recordMailAccountRenewal(ctx, db, account.ID)
 		return hydrateLatestPublicIMAPMessage(ctx, account, limitPublicMailMessages(items)), nil
 	}
 
@@ -871,12 +872,12 @@ func receivePOP3MailDetail(ctx context.Context, account mailAccountTestConfig, u
 func loadPublicMailAccountByEmail(ctx context.Context, db *sql.DB, email string) (mailAccountTestConfig, error) {
 	var account mailAccountTestConfig
 	err := db.QueryRowContext(ctx, `
-SELECT email, password, imap_host, imap_protocol, imap_port, imap_ssl, smtp_host, smtp_protocol, smtp_port, smtp_ssl
+SELECT id, email, password, imap_host, imap_protocol, imap_port, imap_ssl, smtp_host, smtp_protocol, smtp_port, smtp_ssl
 FROM mail_accounts
 WHERE LOWER(email) = LOWER($1) AND LOWER(status) <> 'disabled'
 ORDER BY CASE WHEN LOWER(status) IN ('active', 'normal', 'ok', 'success') THEN 0 ELSE 1 END, id ASC
 LIMIT 1
-`, email).Scan(&account.Email, &account.Password, &account.ImapHost, &account.ImapProtocol, &account.ImapPort, &account.ImapSSL, &account.SMTPHost, &account.SMTPProtocol, &account.SMTPPort, &account.SMTPSSL)
+`, email).Scan(&account.ID, &account.Email, &account.Password, &account.ImapHost, &account.ImapProtocol, &account.ImapPort, &account.ImapSSL, &account.SMTPHost, &account.SMTPProtocol, &account.SMTPPort, &account.SMTPSSL)
 	return account, err
 }
 

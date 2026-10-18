@@ -35,7 +35,7 @@ import { getSessionItem, setSessionItem } from '../api/session'
 type SortKey = 'email' | 'id' | 'username' | 'role' | 'balance' | 'status' | 'created_at'
 type SortOrder = 'asc' | 'desc'
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const loading = ref(false)

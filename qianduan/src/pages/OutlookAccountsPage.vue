@@ -14,7 +14,7 @@ import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { normalizeOutlookAccountPageCache, outlookAccountPageCacheKey, outlookManagementCacheKey, rememberOutlookAccountPage, type OutlookAccountPageCacheEntry } from '../utils/outlookManagementCache'
 import { watchAuthSession } from '../api/session'
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const taskStore = useTaskStore()
 const queryClient = useQueryClient()

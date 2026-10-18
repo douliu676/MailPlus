@@ -28,7 +28,7 @@ import {
 } from '../api/cardKeys'
 import { copyToClipboard } from '../utils/clipboard'
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const fallbackTablePageSize = 10

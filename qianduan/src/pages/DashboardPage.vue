@@ -20,7 +20,7 @@ type ProfileUser = {
   created_at?: string
 }
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const dashboardCacheKey = 'dashboard_stats_cache_v1'

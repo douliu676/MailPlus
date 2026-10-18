@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import { getPublicSettings, type PublicSettings } from '../api/settings'
+import { createAuthCacheGuard } from '../api/session'
 
 declare global {
   interface Window {
@@ -199,7 +200,13 @@ function cancelConfirm() {
   closeConfirm(false)
 }
 
-export function useAppStore() {
+export function useAppStore(options: { sessionScoped?: boolean } = {}) {
+  // Admin pages can finish requests after logout or after another login. Their
+  // notifications belong to the session which created the page, even when an
+  // API wrapper has converted cancellation into a plain error message.
+  const mayNotify = options.sessionScoped ? createAuthCacheGuard() : () => true
+  const scoped = <Args extends unknown[], Result>(notify: (...args: Args) => Result) =>
+    (...args: Args) => mayNotify() ? notify(...args) : undefined
   return {
     publicSettingsLoaded,
     cachedPublicSettings,
@@ -210,12 +217,12 @@ export function useAppStore() {
     confirmDialog,
     fetchPublicSettings,
     hideToast,
-    showSuccess,
-    showError,
-    showWarning,
-    showInfo,
-    showTaskResult,
-    showConfirm,
+    showSuccess: scoped(showSuccess),
+    showError: scoped(showError),
+    showWarning: scoped(showWarning),
+    showInfo: scoped(showInfo),
+    showTaskResult: scoped(showTaskResult),
+    showConfirm: (options: ConfirmOptions) => mayNotify() ? showConfirm(options) : Promise.resolve(false),
     confirmAction,
     cancelConfirm,
   }

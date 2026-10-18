@@ -4,7 +4,7 @@ import { CheckCircle2, Download, ListChecks, LoaderCircle, Trash2, X, XCircle } 
 import { useAppStore } from '../stores/app'
 import { useTaskStore, type BackgroundTask } from '../stores/tasks'
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const taskStore = useTaskStore()
 const props = withDefaults(defineProps<{
   variant?: 'topbar' | 'sidebar'

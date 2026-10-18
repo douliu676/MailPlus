@@ -165,12 +165,24 @@ export function installAuthFetchInterceptor() {
   Object.keys(localStorage).filter((key) => key.startsWith('system_settings_cache_')).forEach((key) => localStorage.removeItem(key))
   if (!getAuthToken()) clearAuthScopedStorage()
   const rawFetch = window.fetch.bind(window)
+  let sessionToken = getAuthToken()
+  let sessionRequests = new AbortController()
+  const syncRequestSession = () => {
+    const current = getAuthToken()
+    if (current === sessionToken) return
+    sessionToken = current
+    sessionRequests.abort()
+    sessionRequests = new AbortController()
+  }
+  watchAuthSession(syncRequestSession)
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
     const requestURL = new URL(url, window.location.href)
     const shouldAttachAuth = requestURL.origin === window.location.origin && /^\/api\/(?:admin|user)(?:\/|$)/.test(requestURL.pathname)
     const optionalQuickMailAuth = /^\/api\/admin\/quick-mail\/(?:imap|outlook)\/(?:receive|detail)\/?$/.test(requestURL.pathname)
+    const publicOAuthCallback = requestURL.pathname === '/api/admin/outlook-oauth/callback'
+    syncRequestSession()
     const token = shouldAttachAuth ? getAuthToken() : ''
     const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined))
 
@@ -178,11 +190,23 @@ export function installAuthFetchInterceptor() {
       headers.set('Authorization', `Bearer ${token}`)
     }
     const requestToken = /^Bearer\s+(.+)$/i.exec(headers.get('Authorization') || '')?.[1].trim() || ''
+    if (shouldAttachAuth && !optionalQuickMailAuth && !publicOAuthCallback && !requestToken) {
+      throw new DOMException('请求已取消', 'AbortError')
+    }
+    const ownedBySession = Boolean(shouldAttachAuth && token && requestToken === token)
+    const callerSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    const signal = ownedBySession
+      ? AbortSignal.any([sessionRequests.signal, ...(callerSignal ? [callerSignal] : [])])
+      : callerSignal
 
     const response = await rawFetch(input, {
       ...init,
       headers,
+      ...(signal ? { signal } : {}),
     })
+    if (ownedBySession && readAuthSession()?.auth_token !== requestToken) {
+      throw new DOMException('登录状态已变更', 'AbortError')
+    }
 
     const authError = response.headers.get('X-MailPlus-Auth-Error')
     const sessionRejected = authError === 'session' || (!authError && !optionalQuickMailAuth)

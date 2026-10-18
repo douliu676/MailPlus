@@ -8,7 +8,7 @@ import { useAppStore } from '../stores/app'
 import { getAdminSettings } from '../api/adminSettings'
 import { createProxyNode, deleteProxyNode, getProxyRuntime, getProxySettings, importProxyNodes, listProxyNodes, testProxyNode, updateProxyNode, updateProxySettings, type ProxyNode, type ProxyNodeListParams, type ProxyNodeListResponse, type ProxyProtocol, type ProxyRuntime, type ProxySettings, type SaveProxyNodePayload } from '../api/proxySystem'
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const queryClient = useQueryClient()
 const fallbackTablePageSize = 10

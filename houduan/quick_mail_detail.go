@@ -74,6 +74,7 @@ func (s *appState) quickMailDetailIMAP(c *gin.Context) {
 		writeQuickMailError(c, "读取邮件正文", err)
 		return
 	}
+	recordMailAccountRenewal(c.Request.Context(), db, account.ID)
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: quickIMAPDetailMessage(account.Email, detail.receivedMailMessage, detail), Msg: "ok"})
 }
 

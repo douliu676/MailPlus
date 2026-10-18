@@ -89,7 +89,12 @@ const form = reactive({
 const activeFolder = ref<FolderKey>('inbox')
 const submitted = ref(false)
 const keyVisible = ref(false)
-const reader = useQuickMailReader({ receive: receiveQuickMail, detail: receiveQuickMailDetail })
+const reader = useQuickMailReader({ receive: receiveQuickMail, detail: receiveQuickMailDetail }, {
+  onCacheComplete({ total, cached, failed }) {
+    if (failed) appStore.showWarning(`已缓存 ${cached}/${total} 封，${failed} 封正文加载失败`)
+    else appStore.showSuccess('邮件正文已全部缓存完成')
+  },
+})
 const { fetching, selectedMessage, lastQueryEmail, messages, detailLoading, detailError } = reader
 const mailPage = ref(1)
 const mailPageSize = ref(readStoredPageSize(initialMode))

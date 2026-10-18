@@ -31,6 +31,7 @@ export type MailAccount = {
   status: string
   status_reason: string
   created_at: string
+  last_renewed_at?: string
 }
 
 export type MailAccountListResponse = {

@@ -15,7 +15,7 @@ import { mailContactDetail, mailContactEmails } from '../utils/mailContacts'
 import { mailAccountPageCacheKey, mailManagementCacheKey, normalizeMailAccountPageCache, rememberMailAccountPage, type MailAccountPageCacheEntry } from '../utils/mailManagementCache'
 import { watchAuthSession } from '../api/session'
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const taskStore = useTaskStore()
 const queryClient = useQueryClient()
@@ -1459,6 +1459,7 @@ async function fetchReceiveMessages() {
     receivePage.value = 1
     saveReceiveCache(receiveTarget.value.id)
     appStore.showSuccess('收取邮件成功')
+    syncMailAccountsQuietly(false)
     startReceiveDetailWarmup(receiveTarget.value.id, receiveMessages.inbox, receiveMessages.trash)
   } catch (error) {
     appStore.showError(error instanceof Error ? error.message : '收取邮件失败')
@@ -2123,7 +2124,12 @@ onBeforeUnmount(() => {
                     <div>发：{{ item.smtp_host || '-' }}</div>
                   </div>
                 </td>
-                <td class="px-5 py-4 text-gray-500 dark:text-dark-400">{{ item.created_at }}</td>
+                <td class="px-5 py-4 text-gray-500 dark:text-dark-400">
+                  <div class="grid min-w-0 gap-[0.2rem] leading-[1.45]">
+                    <div class="truncate" :title="item.created_at">{{ item.created_at }}</div>
+                    <div v-if="item.last_renewed_at" class="mail-renewal-line truncate text-xs font-semibold leading-[1.45] text-teal-500 dark:text-teal-300" :title="`续期: ${item.last_renewed_at}`">续期: {{ item.last_renewed_at }}</div>
+                  </div>
+                </td>
                 <td class="px-5 py-4">
                   <div class="mail-status-cell">
                     <span class="badge" :class="mailStatusClass(item.status)">
@@ -2907,7 +2913,7 @@ onBeforeUnmount(() => {
   --mail-col-group: 14rem;
   --mail-col-email: 19rem;
   --mail-col-server: 12rem;
-  --mail-col-created: 10rem;
+  --mail-col-created: 13rem;
   --mail-col-status: 5.2rem;
   --mail-col-remark: 15.5rem;
   --mail-col-actions: 170px;

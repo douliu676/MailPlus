@@ -33,7 +33,7 @@ import { useTaskStore } from '../stores/tasks'
 
 type SettingsTab = 'general' | 'backup'
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const taskStore = useTaskStore()
 const settingsPageCacheKey = 'system_settings_cache_v3'

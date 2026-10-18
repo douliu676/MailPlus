@@ -189,6 +189,7 @@ func (s *appState) quickMailReceiveIMAP(c *gin.Context) {
 		}
 		inbox, trash = details[:len(messages.Inbox)], details[len(messages.Inbox):]
 	}
+	recordMailAccountRenewal(c.Request.Context(), db, account.ID)
 
 	c.JSON(http.StatusOK, apiResponse{
 		Code: 0,
@@ -465,7 +466,11 @@ func fetchQuickIMAPPlainMessages(ctx context.Context, email string, limit int) (
 		items = items[:limit]
 	}
 
-	return quickIMAPMessagesWithDetails(ctx, account, email, items)
+	messages, err := quickIMAPMessagesWithDetails(ctx, account, email, items)
+	if err == nil {
+		recordMailAccountRenewal(ctx, db, account.ID)
+	}
+	return messages, err
 }
 
 func fetchQuickOutlookPlainMessages(ctx context.Context, email string, limit int) ([]quickMailMessage, error) {

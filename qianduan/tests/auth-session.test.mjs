@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createContext, runInContext } from 'node:vm'
 import ts from 'typescript'
+import { computed, ref } from 'vue'
 
 const apiDirectory = new URL('../src/api/', import.meta.url)
 const compiled = new Map()
@@ -65,6 +66,7 @@ function browserFixture() {
     })
     const sessionValues = new Map()
     window.sessionStorage = storageView(sessionValues)
+    window.setTimeout = () => 0
     const tab = { window, redirects, sessionValues, clearedEvents: 0 }
     tab.respond = async () => jsonResponse({ code: 0, data: {} })
     window.fetch = async (input, init) => {
@@ -80,14 +82,15 @@ function browserFixture() {
     }
     const context = createContext({
       window, localStorage: window.localStorage, sessionStorage: window.sessionStorage,
-      Event, EventTarget, CustomEvent, Headers, Request, Response, URL, DOMException, AbortController,
+      Event, EventTarget, CustomEvent, Headers, Request, Response, URL, DOMException, AbortController, AbortSignal,
       setTimeout, clearTimeout, console, fetch: (...args) => window.fetch(...args),
     })
     const modules = new Map()
     function load(name) {
+      if (name === 'vue') return { computed, ref }
       name = name.replace(/^\.\//, '').replace(/\.ts$/, '')
-      if (modules.has(name)) return modules.get(name)
       const filename = fileURLToPath(new URL(name + '.ts', apiDirectory))
+      if (modules.has(filename)) return modules.get(filename)
       if (!compiled.has(filename)) {
         compiled.set(filename, ts.transpileModule(readFileSync(filename, 'utf8'), {
           compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -95,12 +98,13 @@ function browserFixture() {
         }).outputText)
       }
       const module = { exports: {} }
-      modules.set(name, module.exports)
+      modules.set(filename, module.exports)
       runInContext('(function(exports, require, module) {\n' + compiled.get(filename) + '\n})', context, { filename })(module.exports, load, module)
       return module.exports
     }
     tab.session = load('session')
     tab.auth = load('auth')
+    tab.useAppStore = load('../stores/app').useAppStore
     window.addEventListener(tab.session.authSessionClearedEvent, () => { tab.clearedEvents++ })
     tabs.push(tab)
     return tab
@@ -208,6 +212,100 @@ test('logout revokes the current server session before discarding local credenti
   assert.deepEqual(requests, [{ url: '/api/auth/logout', method: 'POST', token: 'Bearer fixture-old-session' }])
 })
 
+test('a signed-out admin page cannot emit errors or task messages into the next session', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/accounts')
+  const oldStore = tab.useAppStore({ sessionScoped: true })
+  oldStore.showError('请先登录')
+  assert.equal(oldStore.toasts.value.length, 1, 'a live-session error must remain visible')
+  oldStore.toasts.value = []
+  tab.auth.logout()
+  oldStore.showError('请先登录')
+  oldStore.showError('CancelledError')
+  oldStore.showSuccess('old operation finished')
+  oldStore.showWarning('old task failed')
+  assert.equal(await oldStore.showConfirm({ message: 'stale confirmation' }), false)
+  assert.equal(oldStore.toasts.value.length, 0)
+  await browser.login(tab)
+  oldStore.showError('late failure from the previous login')
+  assert.equal(oldStore.toasts.value.length, 0)
+  const newStore = tab.useAppStore({ sessionScoped: true })
+  newStore.showError('current operation failed')
+  assert.equal(newStore.toasts.value.length, 1)
+})
+
+test('login and public reader errors remain visible after logout', () => {
+  const browser = browserFixture()
+  const tab = browser.newTab('/login')
+  const store = tab.useAppStore()
+  store.showError('账号或密码错误')
+  store.showError('秘钥错误')
+  assert.equal(store.toasts.value.length, 2)
+})
+
+test('a late admin loader cannot send an anonymous request after logout', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/accounts')
+  const paths = []
+  tab.respond = async (url) => { paths.push(url); return jsonResponse({ code: 0, data: {} }) }
+  tab.session.installAuthFetchInterceptor()
+  tab.auth.logout()
+  await assert.rejects(tab.window.fetch('/api/admin/mail-accounts'), { name: 'AbortError' })
+  await assert.rejects(tab.window.fetch('/api/user/profile'), { name: 'AbortError' })
+  assert.deepEqual(paths, ['/api/auth/logout'])
+  // Public key-based mail access and the OAuth callback are deliberately public.
+  await tab.window.fetch('/api/admin/quick-mail/imap/receive', { method: 'POST' })
+  await tab.window.fetch('/api/admin/outlook-oauth/callback?error=fixture')
+  assert.equal(paths.length, 3)
+})
+
+test('logout aborts requests in this tab and in another tab without cancelling the logout itself', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const admin = browser.newTab('/admin/accounts')
+  const other = browser.newTab('/admin/settings')
+  const signals = []
+  for (const tab of [admin, other]) {
+    tab.respond = (url, init) => {
+      if (url === '/api/auth/logout') return Promise.resolve(jsonResponse({ code: 0 }))
+      signals.push(init.signal)
+      return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')), { once: true }))
+    }
+    tab.session.installAuthFetchInterceptor()
+  }
+  const first = assert.rejects(admin.window.fetch('/api/admin/mail-accounts'), { name: 'AbortError' })
+  const second = assert.rejects(other.window.fetch('/api/admin/settings'), { name: 'AbortError' })
+  admin.auth.logout()
+  browser.deliverStorageEvents()
+  await Promise.all([first, second])
+  assert.equal(signals.length, 2)
+  assert.ok(signals.every((signal) => signal.aborted))
+})
+
+test('caller cancellation remains independent of other requests in the same login', async () => {
+  const browser = browserFixture()
+  browser.seedLegacySession()
+  const tab = browser.newTab('/admin/accounts')
+  const signals = []
+  tab.respond = (_url, init) => {
+    signals.push(init.signal)
+    return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')), { once: true }))
+  }
+  tab.session.installAuthFetchInterceptor()
+  const caller = new AbortController()
+  const first = assert.rejects(tab.window.fetch(new Request('http://mailplus.example.invalid/api/user/profile', { signal: caller.signal })), { name: 'AbortError' })
+  const second = assert.rejects(tab.window.fetch('/api/admin/settings'), { name: 'AbortError' })
+  caller.abort()
+  await first
+  assert.equal(signals[0].aborted, true)
+  assert.equal(signals[1].aborted, false)
+  assert.equal(tab.session.getAuthToken(), 'fixture-old-session')
+  tab.session.clearAuthSession()
+  await second
+})
+
 for (const mode of ['imap', 'outlook']) {
   test('logging in with an open ' + mode + ' reader does not broadcast a logout', async () => {
     const browser = browserFixture()
@@ -245,9 +343,10 @@ test('a delayed 401 from the previous login cannot clear the new login', async (
   }
   tab.session.installAuthFetchInterceptor()
   const pending = tab.window.fetch('/api/user/profile')
+  const rejected = assert.rejects(pending, { name: 'AbortError' })
   await browser.login(tab)
   oldResponse.resolve(unauthorized())
-  assert.equal((await pending).status, 401)
+  await rejected
   assert.equal(tab.session.getAuthToken(), 'fixture-new-session')
   assert.deepEqual(tab.redirects, [])
 })
@@ -258,7 +357,11 @@ test('a current session rejected by a protected endpoint still logs out once', a
   const tab = browser.newTab('/admin/accounts')
   tab.respond = async () => unauthorized()
   tab.session.installAuthFetchInterceptor()
-  await Promise.all([tab.window.fetch('/api/user/profile'), tab.window.fetch('/api/admin/mail-accounts')])
+  const results = await Promise.allSettled([tab.window.fetch('/api/user/profile'), tab.window.fetch('/api/admin/mail-accounts')])
+  assert.equal(results[0].status, 'fulfilled')
+  assert.equal(results[0].value.status, 401)
+  assert.equal(results[1].status, 'rejected')
+  assert.equal(results[1].reason.name, 'AbortError')
   assert.equal(tab.session.getAuthToken(), '')
   assert.deepEqual(tab.redirects, ['/login'])
   assert.equal(tab.clearedEvents, 1)

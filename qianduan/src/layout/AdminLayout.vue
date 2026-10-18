@@ -28,13 +28,15 @@ import AppLogo from '../components/AppLogo.vue'
 import TaskCenter from '../components/TaskCenter.vue'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
-import { getSessionItem, setSessionItem } from '../api/session'
+import { createAuthCacheGuard, getSessionItem, setSessionItem } from '../api/session'
 import { checkAppUpdate, type UpdateCheckResult } from '../api/adminSettings'
 
 const sidebarStorageKey = 'admin_sidebar_collapsed'
 const route = useRoute()
 const router = useRouter()
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
+const sameSession = createAuthCacheGuard()
+let disposed = false
 const sidebarCollapsed = ref(localStorage.getItem(sidebarStorageKey) !== 'false')
 const mobileSidebarOpen = ref(false)
 const userDropdownOpen = ref(false)
@@ -229,6 +231,7 @@ const shouldShowVersionDot = computed(() => updateCheckResult.value?.status === 
 const versionThemeClass = computed(() => (isDark.value ? 'admin-version-dark' : 'admin-version-light'))
 const updateReleaseURL = computed(() => updateCheckResult.value?.release_url || updateCheckResult.value?.source_url || '')
 let profileRefreshTimer: number | undefined
+let updateCheckTimer: number | undefined
 let lastViewportBucket = ''
 
 onMounted(() => {
@@ -240,11 +243,13 @@ onMounted(() => {
   document.addEventListener('keydown', handleKeydown)
   window.addEventListener('storage', refreshStoredUser)
   window.addEventListener('resize', syncResponsiveSidebar)
-  window.setTimeout(() => refreshUpdateStatus(false), 600)
+  updateCheckTimer = window.setTimeout(() => refreshUpdateStatus(false), 600)
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   window.clearInterval(profileRefreshTimer)
+  window.clearTimeout(updateCheckTimer)
   document.body.style.overflow = ''
   document.removeEventListener('click', handleClickOutside)
   document.removeEventListener('keydown', handleKeydown)
@@ -289,10 +294,11 @@ function closeVersionPanel() {
 }
 
 async function refreshUpdateStatus(showToast = true) {
-  if (updateChecking.value) return
+  if (disposed || !sameSession() || updateChecking.value) return
   updateChecking.value = true
   try {
     const result = await checkAppUpdate(showToast)
+    if (disposed || !sameSession()) return
     updateCheckResult.value = result
     if (result.current_version) {
       siteVersion.value = result.current_version
@@ -378,6 +384,7 @@ function refreshStoredUser() {
 }
 
 async function refreshProfile() {
+  if (disposed || !sameSession()) return
   const id = Number(userSnapshot.value.id || 1)
   try {
     const response = await fetch('/api/user/profile', {
@@ -387,7 +394,7 @@ async function refreshProfile() {
       },
     })
     const result = await response.json().catch(() => null)
-    if (!response.ok || result?.code !== 0 || !result.data) return
+    if (disposed || !sameSession() || !response.ok || result?.code !== 0 || !result.data) return
 
     userSnapshot.value = { ...userSnapshot.value, ...result.data }
     setSessionItem('auth_user', JSON.stringify(userSnapshot.value))

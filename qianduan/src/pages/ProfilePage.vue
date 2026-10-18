@@ -18,7 +18,7 @@ type ProfileUser = {
   avatar_url?: string
 }
 
-const appStore = useAppStore()
+const appStore = useAppStore({ sessionScoped: true })
 const mayWriteSessionCache = createAuthCacheGuard()
 const router = useRouter()
 const avatarDraft = ref('')

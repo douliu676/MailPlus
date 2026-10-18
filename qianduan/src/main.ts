@@ -14,7 +14,7 @@ const queryClient = new QueryClient({
       staleTime: 30_000,
       gcTime: 10 * 60_000,
       refetchOnWindowFocus: false,
-      retry: 1,
+      retry: (failureCount, error) => error?.name !== 'AbortError' && failureCount < 1,
     },
   },
 })

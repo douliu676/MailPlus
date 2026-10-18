@@ -763,24 +763,25 @@ type saveMailServerRequest struct {
 }
 
 type mailAccountResponse struct {
-	ID           int    `json:"id"`
-	GroupID      int    `json:"group_id"`
-	GroupName    string `json:"group_name"`
-	Email        string `json:"email"`
-	ServerID     int    `json:"server_id"`
-	ServerName   string `json:"server_name"`
-	ImapHost     string `json:"imap_host"`
-	SMTPHost     string `json:"smtp_host"`
-	ImapProtocol string `json:"imap_protocol"`
-	ImapPort     int    `json:"imap_port"`
-	ImapSSL      bool   `json:"imap_ssl"`
-	SMTPProtocol string `json:"smtp_protocol"`
-	SMTPPort     int    `json:"smtp_port"`
-	SMTPSSL      bool   `json:"smtp_ssl"`
-	Remark       string `json:"remark"`
-	Status       string `json:"status"`
-	StatusReason string `json:"status_reason"`
-	CreatedAt    string `json:"created_at"`
+	LastRenewedAt string `json:"last_renewed_at"`
+	ID            int    `json:"id"`
+	GroupID       int    `json:"group_id"`
+	GroupName     string `json:"group_name"`
+	Email         string `json:"email"`
+	ServerID      int    `json:"server_id"`
+	ServerName    string `json:"server_name"`
+	ImapHost      string `json:"imap_host"`
+	SMTPHost      string `json:"smtp_host"`
+	ImapProtocol  string `json:"imap_protocol"`
+	ImapPort      int    `json:"imap_port"`
+	ImapSSL       bool   `json:"imap_ssl"`
+	SMTPProtocol  string `json:"smtp_protocol"`
+	SMTPPort      int    `json:"smtp_port"`
+	SMTPSSL       bool   `json:"smtp_ssl"`
+	Remark        string `json:"remark"`
+	Status        string `json:"status"`
+	StatusReason  string `json:"status_reason"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type mailAccountListResponse struct {
@@ -864,23 +865,24 @@ type mailDataGroup struct {
 }
 
 type mailDataAccount struct {
-	ID           int    `json:"id"`
-	GroupID      int    `json:"group_id"`
-	Email        string `json:"email"`
-	Password     string `json:"password"`
-	ServerID     int    `json:"server_id"`
-	ImapHost     string `json:"imap_host"`
-	SMTPHost     string `json:"smtp_host"`
-	ImapProtocol string `json:"imap_protocol"`
-	ImapPort     int    `json:"imap_port"`
-	ImapSSL      bool   `json:"imap_ssl"`
-	SMTPProtocol string `json:"smtp_protocol"`
-	SMTPPort     int    `json:"smtp_port"`
-	SMTPSSL      bool   `json:"smtp_ssl"`
-	Remark       string `json:"remark"`
-	Status       string `json:"status"`
-	StatusReason string `json:"status_reason"`
-	CreatedAt    string `json:"created_at"`
+	LastRenewedAt string `json:"last_renewed_at,omitempty"`
+	ID            int    `json:"id"`
+	GroupID       int    `json:"group_id"`
+	Email         string `json:"email"`
+	Password      string `json:"password"`
+	ServerID      int    `json:"server_id"`
+	ImapHost      string `json:"imap_host"`
+	SMTPHost      string `json:"smtp_host"`
+	ImapProtocol  string `json:"imap_protocol"`
+	ImapPort      int    `json:"imap_port"`
+	ImapSSL       bool   `json:"imap_ssl"`
+	SMTPProtocol  string `json:"smtp_protocol"`
+	SMTPPort      int    `json:"smtp_port"`
+	SMTPSSL       bool   `json:"smtp_ssl"`
+	Remark        string `json:"remark"`
+	Status        string `json:"status"`
+	StatusReason  string `json:"status_reason"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type mailDataPayload struct {
@@ -931,6 +933,7 @@ type receiveMailMessagesResponse struct {
 }
 
 type mailAccountTestConfig struct {
+	ID           int
 	Email        string
 	Password     string
 	ImapHost     string
@@ -3414,6 +3417,9 @@ CREATE TABLE IF NOT EXISTS mail_accounts (
 	if _, err = db.ExecContext(ctx, `ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS status_reason TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err = ensureMailAccountRenewalColumn(ctx, db); err != nil {
+		return err
+	}
 
 	indexStatements := []string{
 		`CREATE UNIQUE INDEX IF NOT EXISTS mail_accounts_group_email_unique_idx ON mail_accounts (group_id, email)`,
@@ -3965,7 +3971,7 @@ WHERE `+whereSQL, args...).Scan(&total, &normal); err != nil {
 
 	rows, err := db.QueryContext(c.Request.Context(), `
 SELECT a.id, a.group_id, COALESCE(g.name, ''), a.email, a.server_id, COALESCE(s.name, ''), a.imap_host, a.smtp_host,
-       a.imap_protocol, a.imap_port, a.imap_ssl, a.smtp_protocol, a.smtp_port, a.smtp_ssl, a.remark, a.status, a.status_reason, a.created_at
+       a.imap_protocol, a.imap_port, a.imap_ssl, a.smtp_protocol, a.smtp_port, a.smtp_ssl, a.remark, a.status, a.status_reason, a.created_at, a.last_renewed_at
 FROM mail_accounts a
 LEFT JOIN mail_groups g ON g.id = a.group_id
 LEFT JOIN mail_servers s ON s.id = a.server_id
@@ -3983,11 +3989,15 @@ LIMIT $`+strconv.Itoa(limitIndex)+` OFFSET $`+strconv.Itoa(offsetIndex)+`
 	for rows.Next() {
 		var item mailAccountResponse
 		var createdAt time.Time
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupName, &item.Email, &item.ServerID, &item.ServerName, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt); err != nil {
+		var lastRenewedAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupName, &item.Email, &item.ServerID, &item.ServerName, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt, &lastRenewedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "获取邮箱账号失败"})
 			return
 		}
 		item.CreatedAt = createdAt.Format("2006/01/02 15:04:05")
+		if lastRenewedAt.Valid {
+			item.LastRenewedAt = lastRenewedAt.Time.Format("2006/01/02 15:04:05")
+		}
 		items = append(items, item)
 	}
 
@@ -4480,6 +4490,7 @@ func runMailAccountConnectivityTest(ctx context.Context, db *sql.DB, id int, tes
 		return err
 	}
 	updateMailAccountStatus(ctx, db, id, "normal", "")
+	recordMailAccountRenewal(ctx, db, id)
 	return nil
 }
 
@@ -4520,6 +4531,7 @@ func (s *appState) testMailAccount(c *gin.Context) {
 	}
 
 	updateMailAccountStatus(c.Request.Context(), db, id, "normal", "")
+	recordMailAccountRenewal(c.Request.Context(), db, id)
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: gin.H{"message": "邮箱连接测试成功"}, Msg: "ok"})
 }
 
@@ -4556,6 +4568,7 @@ func (s *appState) receiveMailMessages(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "收取邮件失败: " + err.Error()})
 		return
 	}
+	recordMailAccountRenewal(c.Request.Context(), db, id)
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: messages, Msg: "ok"})
 }
 
@@ -4591,6 +4604,7 @@ func (s *appState) receiveMailDetail(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "读取邮件失败: " + err.Error()})
 		return
 	}
+	recordMailAccountRenewal(c.Request.Context(), db, id)
 	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: detail, Msg: "ok"})
 }
 
@@ -4681,18 +4695,22 @@ SET group_id = $2, server_id = $3, email = $4, imap_host = $5, smtp_host = $6,
 `
 	args := []interface{}{id, req.GroupID, req.ServerID, req.Email, req.ImapHost, req.SMTPHost, req.ImapProtocol, req.ImapPort, req.ImapSSL, req.SMTPProtocol, req.SMTPPort, req.SMTPSSL, req.Remark}
 	if req.Password != "" {
-		query += `, password = $14 WHERE id = $1 RETURNING id, group_id, email, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl, smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at`
+		query += `, password = $14 WHERE id = $1 RETURNING id, group_id, email, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl, smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at, last_renewed_at`
 		args = append(args, req.Password)
 	} else {
-		query += ` WHERE id = $1 RETURNING id, group_id, email, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl, smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at`
+		query += ` WHERE id = $1 RETURNING id, group_id, email, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl, smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at, last_renewed_at`
 	}
 
 	var createdAt time.Time
-	err = db.QueryRowContext(ctx, query, args...).Scan(&item.ID, &item.GroupID, &item.Email, &item.ServerID, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt)
+	var lastRenewedAt sql.NullTime
+	err = db.QueryRowContext(ctx, query, args...).Scan(&item.ID, &item.GroupID, &item.Email, &item.ServerID, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt, &lastRenewedAt)
 	if err != nil {
 		return item, fmt.Errorf("邮箱账号不存在或保存失败")
 	}
 	item.CreatedAt = createdAt.Format("2006/01/02 15:04:05")
+	if lastRenewedAt.Valid {
+		item.LastRenewedAt = lastRenewedAt.Time.Format("2006/01/02 15:04:05")
+	}
 	if err := db.QueryRowContext(ctx, `SELECT name FROM mail_groups WHERE id = $1`, item.GroupID).Scan(&item.GroupName); err != nil {
 		item.GroupName = ""
 	}
@@ -4718,10 +4736,10 @@ func testTCPAddress(host string, port int) error {
 func loadMailAccountTestConfig(ctx context.Context, db *sql.DB, id int) (mailAccountTestConfig, error) {
 	var account mailAccountTestConfig
 	err := db.QueryRowContext(ctx, `
-SELECT email, password, imap_host, imap_protocol, imap_port, imap_ssl, smtp_host, smtp_protocol, smtp_port, smtp_ssl
+SELECT id, email, password, imap_host, imap_protocol, imap_port, imap_ssl, smtp_host, smtp_protocol, smtp_port, smtp_ssl
 FROM mail_accounts
 WHERE id = $1
-`, id).Scan(&account.Email, &account.Password, &account.ImapHost, &account.ImapProtocol, &account.ImapPort, &account.ImapSSL, &account.SMTPHost, &account.SMTPProtocol, &account.SMTPPort, &account.SMTPSSL)
+`, id).Scan(&account.ID, &account.Email, &account.Password, &account.ImapHost, &account.ImapProtocol, &account.ImapPort, &account.ImapSSL, &account.SMTPHost, &account.SMTPProtocol, &account.SMTPPort, &account.SMTPSSL)
 	return account, err
 }
 
@@ -4822,7 +4840,7 @@ func writeExportAccountsJSON(ctx context.Context, db *sql.DB, w io.Writer, selec
 			}
 			query := `
 SELECT id, group_id, email, password, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl,
-       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at
+       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at, last_renewed_at
 FROM mail_accounts
 WHERE id IN (` + placeholders + `)
 ORDER BY id ASC`
@@ -4840,7 +4858,7 @@ ORDER BY id ASC`
 	}
 	query := `
 SELECT id, group_id, email, password, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl,
-       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at
+       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at, last_renewed_at
 FROM mail_accounts
 WHERE ` + whereSQL + `
 ORDER BY id ASC`
@@ -4861,12 +4879,16 @@ func writeMailAccountRowsJSON(ctx context.Context, db *sql.DB, w io.Writer, enco
 	for rows.Next() {
 		var item mailDataAccount
 		var createdAt time.Time
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.Email, &item.Password, &item.ServerID, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt); err != nil {
+		var lastRenewedAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.Email, &item.Password, &item.ServerID, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt, &lastRenewedAt); err != nil {
 			return err
 		}
 		item.Status = mailExportStatusText(item.Status)
 		item.StatusReason = ""
 		item.CreatedAt = createdAt.Format(time.RFC3339)
+		if lastRenewedAt.Valid {
+			item.LastRenewedAt = lastRenewedAt.Time.Format(time.RFC3339Nano)
+		}
 		if !*first {
 			if _, err := io.WriteString(w, ","); err != nil {
 				return err
@@ -5035,7 +5057,7 @@ func queryExportMailAccounts(ctx context.Context, db *sql.DB, selector accountEx
 			}
 			query := `
 SELECT id, group_id, email, password, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl,
-       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at
+       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at, last_renewed_at
 FROM mail_accounts
 WHERE id IN (` + placeholders + `)
 ORDER BY id ASC`
@@ -5054,7 +5076,7 @@ ORDER BY id ASC`
 	}
 	query := `
 SELECT id, group_id, email, password, server_id, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl,
-       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at
+       smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at, last_renewed_at
 FROM mail_accounts
 WHERE ` + whereSQL + `
 ORDER BY id ASC`
@@ -5072,10 +5094,14 @@ func queryMailDataAccounts(ctx context.Context, db *sql.DB, query string, args [
 	for rows.Next() {
 		var item mailDataAccount
 		var createdAt time.Time
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.Email, &item.Password, &item.ServerID, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt); err != nil {
+		var lastRenewedAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.Email, &item.Password, &item.ServerID, &item.ImapHost, &item.SMTPHost, &item.ImapProtocol, &item.ImapPort, &item.ImapSSL, &item.SMTPProtocol, &item.SMTPPort, &item.SMTPSSL, &item.Remark, &item.Status, &item.StatusReason, &createdAt, &lastRenewedAt); err != nil {
 			return nil, err
 		}
 		item.CreatedAt = createdAt.Format(time.RFC3339)
+		if lastRenewedAt.Valid {
+			item.LastRenewedAt = lastRenewedAt.Time.Format(time.RFC3339Nano)
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -5241,9 +5267,10 @@ func importMailAccounts(ctx context.Context, tx *sql.Tx, accounts []mailDataAcco
 		}
 
 		createdAtArg, hasCreatedAt := parseMailExportTimeArg(account.CreatedAt)
+		lastRenewedAtArg, _ := parseMailExportTimeArg(account.LastRenewedAt)
 		_, err := tx.ExecContext(ctx, `
-INSERT INTO mail_accounts (group_id, server_id, email, password, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl, smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CASE WHEN $16::boolean THEN $17::timestamptz ELSE NOW() END)
+INSERT INTO mail_accounts (group_id, server_id, email, password, imap_host, smtp_host, imap_protocol, imap_port, imap_ssl, smtp_protocol, smtp_port, smtp_ssl, remark, status, status_reason, created_at, last_renewed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CASE WHEN $16::boolean THEN $17::timestamptz ELSE NOW() END, $18::timestamptz)
 ON CONFLICT (group_id, email) DO UPDATE SET
 	server_id = EXCLUDED.server_id,
 	password = EXCLUDED.password,
@@ -5259,8 +5286,9 @@ ON CONFLICT (group_id, email) DO UPDATE SET
 	status = EXCLUDED.status,
 	status_reason = EXCLUDED.status_reason,
 	created_at = EXCLUDED.created_at,
+	last_renewed_at = GREATEST(mail_accounts.last_renewed_at, EXCLUDED.last_renewed_at),
 	updated_at = NOW()
-`, groupID, account.ServerID, account.Email, account.Password, account.ImapHost, account.SMTPHost, account.ImapProtocol, account.ImapPort, account.ImapSSL, account.SMTPProtocol, account.SMTPPort, account.SMTPSSL, account.Remark, account.Status, account.StatusReason, hasCreatedAt, createdAtArg)
+`, groupID, account.ServerID, account.Email, account.Password, account.ImapHost, account.SMTPHost, account.ImapProtocol, account.ImapPort, account.ImapSSL, account.SMTPProtocol, account.SMTPPort, account.SMTPSSL, account.Remark, account.Status, account.StatusReason, hasCreatedAt, createdAtArg, lastRenewedAtArg)
 		if err != nil {
 			return count, fmt.Errorf("导入邮箱 %s 失败: %w", account.Email, err)
 		}
