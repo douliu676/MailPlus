@@ -11,6 +11,7 @@ const backendURL = new URL(process.env.BACKEND_URL || 'http://127.0.0.1:4400')
 const requestTimeoutMs = Number(process.env.FRONTEND_REQUEST_TIMEOUT_MS || 30000)
 const quickMailRequestTimeoutMs = Number(process.env.FRONTEND_QUICK_MAIL_REQUEST_TIMEOUT_MS || process.env.FRONTEND_REQUEST_TIMEOUT_MS || 110000)
 const publicMailRequestTimeoutMs = Number(process.env.FRONTEND_PUBLIC_MAIL_REQUEST_TIMEOUT_MS || process.env.FRONTEND_REQUEST_TIMEOUT_MS || 110000)
+const databaseRestoreRequestTimeoutMs = Number(process.env.FRONTEND_DATABASE_RESTORE_TIMEOUT_MS || process.env.FRONTEND_REQUEST_TIMEOUT_MS || 1860000)
 const maxRequestURLLength = Number(process.env.FRONTEND_MAX_URL_LENGTH || 8192)
 
 const mimeTypes = {
@@ -147,7 +148,9 @@ function proxyRequest(req, res, rewritePath) {
   })
 
   let timeoutMs = requestTimeoutMs
-  if (isPublicMailOperationPath(target.pathname)) {
+  if (/^\/api\/admin\/database-backup\/restore\/?$/.test(target.pathname)) {
+    timeoutMs = databaseRestoreRequestTimeoutMs
+  } else if (isPublicMailOperationPath(target.pathname)) {
     timeoutMs = publicMailRequestTimeoutMs
   } else if (isQuickMailAPIPath(target.pathname) || isQuickMailPlainPath(target.pathname)) {
     timeoutMs = quickMailRequestTimeoutMs

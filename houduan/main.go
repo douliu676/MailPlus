@@ -1666,12 +1666,6 @@ func (s *appState) testBackupWebDAV(c *gin.Context) {
 }
 
 func (s *appState) restoreDatabaseBackup(c *gin.Context) {
-	tool, err := postgresToolPath("pg_restore")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: err.Error()})
-		return
-	}
-
 	file, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, apiResponse{Code: 400, Msg: "请选择要恢复的备份文件"})
@@ -1699,22 +1693,8 @@ func (s *appState) restoreDatabaseBackup(c *gin.Context) {
 	}
 	defer release()
 
-	cmd := exec.CommandContext(
-		ctx,
-		tool,
-		"--clean",
-		"--if-exists",
-		"--no-owner",
-		"--no-privileges",
-		"--single-transaction",
-		"--dbname", dsn,
-		tempPath,
-	)
-	configureBackgroundProcess(cmd)
-	cmd.Env = postgresToolEnv(tool)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: postgresCommandMessage("数据库恢复失败", dsn, output, err, ctx.Err())})
+	if err := restoreDatabaseFromFile(ctx, dsn, tempPath); err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: err.Error()})
 		return
 	}
 

@@ -27,13 +27,14 @@ async function fixture(t, overrides = {}) {
   const port = reservation.address().port
   await new Promise((resolve) => reservation.close(resolve))
   const env = { ...process.env }
-  for (const key of ['FRONTEND_REQUEST_TIMEOUT_MS', 'FRONTEND_PUBLIC_MAIL_REQUEST_TIMEOUT_MS', 'FRONTEND_QUICK_MAIL_REQUEST_TIMEOUT_MS']) delete env[key]
+  for (const key of ['FRONTEND_REQUEST_TIMEOUT_MS', 'FRONTEND_PUBLIC_MAIL_REQUEST_TIMEOUT_MS', 'FRONTEND_QUICK_MAIL_REQUEST_TIMEOUT_MS', 'FRONTEND_DATABASE_RESTORE_TIMEOUT_MS']) delete env[key]
   Object.assign(env, {
     FRONTEND_HOST: '127.0.0.1', FRONTEND_PORT: String(port),
     BACKEND_URL: `http://127.0.0.1:${backend.address().port}`,
     FRONTEND_REQUEST_TIMEOUT_MS: '120',
     FRONTEND_PUBLIC_MAIL_REQUEST_TIMEOUT_MS: '2000',
     FRONTEND_QUICK_MAIL_REQUEST_TIMEOUT_MS: '2000',
+    FRONTEND_DATABASE_RESTORE_TIMEOUT_MS: '2000',
   }, overrides)
   for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key]
   const child = spawn(process.execPath, [path.join(__dirname, 'frontend-server.js')], {
@@ -127,4 +128,24 @@ test('client cancellation closes the public operation proxy request', async (t) 
   const deadline = Date.now() + 2000
   while (!closed.includes(route) && Date.now() < deadline) await delay(20)
   assert.ok(closed.includes(route), 'the proxy must release the upstream connection')
+})
+
+test('full restore waits beyond the ordinary API deadline and forwards the upload', async (t) => {
+  const { base } = await fixture(t)
+  const body = new FormData()
+  body.append('file', new Blob(['synthetic archive']), 'fixture.dump')
+  const response = await fetch(base + '/api/admin/database-backup/restore', { method: 'POST', body })
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  assert.equal(result.method, 'POST')
+  assert.match(result.body, /synthetic archive/)
+})
+
+test('full restore honors its timeout override and the existing global fallback', async (t) => {
+  for (const override of ['120', undefined]) {
+    const { base } = await fixture(t, { FRONTEND_DATABASE_RESTORE_TIMEOUT_MS: override })
+    const response = await fetch(base + '/api/admin/database-backup/restore', { method: 'POST', body: 'synthetic archive' })
+    assert.equal(response.status, 502)
+    assert.match((await response.json()).msg, /backend request timeout/)
+  }
 })

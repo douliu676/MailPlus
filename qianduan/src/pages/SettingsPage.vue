@@ -817,8 +817,8 @@ onMounted(() => loadSettings({ showLoading: !hasSettingsCache }))
               </button>
             </div>
             <div class="outlook-modal-scroll-body p-6">
-              <p class="text-sm text-gray-600 dark:text-dark-300">上传完整数据库 .dump 备份文件，将当前数据库恢复到备份时的状态。</p>
-              <div class="outlook-import-warning">恢复会清理当前数据库对象并导入备份内容；请确认已经下载当前数据备份，恢复完成后建议重启后端。</div>
+              <p class="text-sm text-gray-600 dark:text-dark-300">支持本系统旧版本的完整 .dump 备份，将当前数据库恢复到备份时的状态。</p>
+              <div class="outlook-import-warning">恢复会覆盖当前数据，请先下载当前数据备份。恢复完成后程序会自动重启，请使用备份中的管理员账号重新登录。</div>
               <label class="mt-5 block">
                 <span class="input-label">数据文件</span>
                 <div class="outlook-import-file-box">
