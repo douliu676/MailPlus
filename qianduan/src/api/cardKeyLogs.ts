@@ -5,6 +5,11 @@ export type CardKeyUseLog = {
   mail_subject: string
   user_ip: string
   used_at: string
+  operation_type?: 'receive' | 'send'
+  operation_status?: 'running' | 'success' | 'failed' | 'unknown' | ''
+  recipient?: string
+  error_message?: string
+  operation_id?: string
 }
 
 export type CardKeyUseLogListParams = {
@@ -48,5 +53,12 @@ export function listCardKeyUseLogs(params: CardKeyUseLogListParams = {}) {
 export function clearCardKeyUseLogs() {
   return request<{ count: number }>('/api/admin/card-key-logs', {
     method: 'DELETE',
+  })
+}
+
+export function resolveCardKeyMailSend(operationID: string, status: 'success' | 'failed') {
+  return request<{ status: string; remaining: number }>(`/api/admin/card-key-mail-operations/${encodeURIComponent(operationID)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ status }),
   })
 }

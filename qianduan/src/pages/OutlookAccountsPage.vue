@@ -1499,7 +1499,7 @@ function openOutlookAuthURL(clientID: string) {
     client_id: clientID,
     response_type: 'code',
     redirect_uri: defaultOutlookManualRedirectURI,
-    scope: 'Mail.ReadWrite offline_access',
+    scope: 'Mail.ReadWrite Mail.Send offline_access',
     response_mode: 'query',
   })
   if (accountForm.email.trim()) params.set('login_hint', accountForm.email.trim())

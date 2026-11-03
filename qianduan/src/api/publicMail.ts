@@ -9,6 +9,9 @@ export type PublicMailInfo = {
   mail_days: number
   mail_keyword: string
   cooldown_seconds: number
+  reserved_count?: number
+  busy?: boolean
+  operation?: 'receive' | 'send' | ''
 }
 
 export type PublicMailMessage = {
@@ -36,6 +39,34 @@ export type PublicMailMessagesResponse = {
   wait_seconds: number
   cooldown_seconds: number
   message: string
+  reserved_count?: number
+}
+
+export type PublicMailSendPayload = {
+  request_id: string
+  email?: string
+  nickname: string
+  recipient: string
+  subject: string
+  body: string
+}
+
+export type PublicMailSendResponse = {
+  operation_id: string
+  request_id: string
+  email: string
+  recipient: string
+  subject: string
+  status: 'running' | 'success' | 'failed' | 'unknown'
+  charged: boolean
+  replayed: boolean
+  used_count: number
+  reserved_count: number
+  remaining: number
+  busy: boolean
+  operation: 'receive' | 'send' | ''
+  message: string
+  error: string
 }
 
 export class PublicMailApiError extends Error {
@@ -53,18 +84,25 @@ export class PublicMailApiError extends Error {
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options?.headers || {}),
-    },
-  })
-  const result = await response.json().catch(() => ({ code: 500, msg: '请求失败', data: {} }))
-  if (!response.ok || result.code !== 0) {
-    throw new PublicMailApiError(result.msg || '请求失败', response.status, result.code || response.status, result.data || {})
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 120_000)
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options?.headers || {}),
+      },
+    })
+    const result = await response.json().catch(() => ({ code: 500, msg: '请求失败', data: {} }))
+    if (!response.ok || result.code !== 0) {
+      throw new PublicMailApiError(result.msg || '请求失败', response.status, result.code || response.status, result.data || {})
+    }
+    return result.data as T
+  } finally {
+    clearTimeout(timer)
   }
-  return result.data as T
 }
 
 function publicMailKeySegment(cardKey: string) {
@@ -82,6 +120,24 @@ export function getPublicMailMessages(cardKey: string, email?: string) {
     method: 'POST',
     body: JSON.stringify({ email: email || '' }),
   })
+}
+
+export function sendPublicMailMessage(cardKey: string, payload: PublicMailSendPayload) {
+  // Never retry a POST automatically. A caller may query this request_id, or
+  // explicitly resubmit the same identifier without sending/charging twice.
+  return request<PublicMailSendResponse>(`/api/public/mail/${publicMailKeySegment(cardKey)}/send`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function newPublicMailRequestID() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+export function getPublicMailSendStatus(cardKey: string, requestID: string) {
+  return request<PublicMailSendResponse>(`/api/public/mail/${publicMailKeySegment(cardKey)}/send/${encodeURIComponent(requestID)}`)
 }
 
 export async function getPublicMailPlain(cardKey: string, email?: string) {

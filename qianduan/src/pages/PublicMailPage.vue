@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Copy, Inbox, Loader2, Moon, RefreshCw, Sun, XCircle } from 'lucide-vue-next'
+import { Copy, Inbox, Loader2, Moon, RefreshCw, Send, Sun, XCircle } from 'lucide-vue-next'
 import AppLogo from '../components/AppLogo.vue'
 import SafeMailFrame from '../components/SafeMailFrame.vue'
-import { getPublicMailInfo, getPublicMailMessages, getPublicMailPlain, PublicMailApiError, type PublicMailInfo, type PublicMailMessage } from '../api/publicMail'
+import MailSendModal from '../components/MailSendModal.vue'
+import { getPublicMailInfo, getPublicMailMessages, getPublicMailPlain, getPublicMailSendStatus, newPublicMailRequestID, sendPublicMailMessage, PublicMailApiError, type PublicMailInfo, type PublicMailMessage, type PublicMailSendResponse } from '../api/publicMail'
 import { useAppStore } from '../stores/app'
 import { useTheme } from '../theme'
 import { copyToClipboard } from '../utils/clipboard'
@@ -18,6 +19,13 @@ const currentMessage = ref<PublicMailMessage | null>(null)
 const emailInput = ref('')
 const loading = ref(false)
 const fetching = ref(false)
+const sendModalOpen = ref(false)
+const sendSending = ref(false)
+const sendNotice = ref('')
+const sendEmail = ref('')
+const sendForm = reactive({ nickname: '', recipient: '', subject: '', body: '' })
+const pendingSendID = ref('')
+const pendingSendStatus = ref('')
 const pageError = ref('')
 const fetchError = ref('')
 const autoFetchText = ref('')
@@ -27,16 +35,25 @@ const publicMailMessageHeaderRef = ref<HTMLElement | null>(null)
 const publicMailFrameMinHeight = ref(800)
 let cooldownTimer: number | undefined
 let publicMailResultObserver: ResizeObserver | null = null
+let stateTimer: number | undefined
+let viewVersion = 0
+let stateVersion = 0
+let disposed = false
+let refreshingState = false
+let lastSendNotification = ''
 
 const siteLogoSrc = computed(() => appStore.siteLogo.value)
 const pageTitle = computed(() => `API取件 - ${appStore.siteName.value}`)
 const autoFetchMode = computed(() => route.meta.autoFetch === true)
 const routeEmail = computed(() => routeParamString(route.params.email).trim())
 const targetEmail = computed(() => info.value?.bound_email || emailInput.value.trim())
-const canFetch = computed(() => Boolean(info.value && info.value.remaining > 0 && targetEmail.value && !fetching.value && cooldown.value <= 0))
+const sendInProgress = computed(() => sendSending.value || pendingSendStatus.value === 'running')
+const operationBusy = computed(() => fetching.value || sendInProgress.value || Boolean(info.value?.busy))
+const canFetch = computed(() => Boolean(info.value && info.value.remaining > 0 && targetEmail.value && !operationBusy.value && cooldown.value <= 0))
+const canSend = computed(() => Boolean(info.value && info.value.remaining > 0 && targetEmail.value && !operationBusy.value && !['running', 'unknown'].includes(pendingSendStatus.value)))
 const remainingText = computed(() => {
   if (!info.value) return ''
-  return `剩余 ${info.value.remaining}/${info.value.usage_limit} 次`
+  return `剩余 ${info.value.remaining}/${info.value.usage_limit} 次${info.value.reserved_count ? `，预留 ${info.value.reserved_count} 次` : ''}`
 })
 const errorTitle = computed(() => {
   if (pageError.value.includes('不存在')) return '此卡密不存在'
@@ -54,7 +71,7 @@ const mailBodyText = computed(() => {
 const emptyMessage = computed(() => {
   if (fetching.value) return '正在收取邮件...'
   if (fetchError.value) return fetchError.value
-  if (info.value && info.value.remaining <= 0) return '卡密使用次数已用完'
+  if (info.value && info.value.remaining <= 0) return info.value.reserved_count ? '存在待确认发件，次数已预留' : '卡密使用次数已用完'
   if (autoFetchMode.value) return '暂无邮件...'
   return '点击获取后显示邮件'
 })
@@ -62,12 +79,21 @@ const emptyMessage = computed(() => {
 onMounted(() => {
   syncPageScrollLock()
   window.addEventListener('resize', updatePublicMailFrameMinHeight)
+  window.addEventListener('focus', refreshOperationState)
   void appStore.fetchPublicSettings()
   void loadInfo()
+  stateTimer = window.setInterval(() => {
+    // Finish recovering submitted mail even after the user switches tabs.
+    if (document.visibilityState !== 'hidden' || pendingSendID.value) void refreshOperationState()
+  }, 3000)
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  viewVersion++
   window.clearInterval(cooldownTimer)
+  window.clearInterval(stateTimer)
+  window.removeEventListener('focus', refreshOperationState)
   window.removeEventListener('resize', updatePublicMailFrameMinHeight)
   publicMailResultObserver?.disconnect()
   publicMailResultObserver = null
@@ -120,6 +146,17 @@ function updatePublicMailFrameMinHeight() {
 }
 
 async function loadInfo() {
+  const version = ++viewVersion
+  stateVersion++
+  sendModalOpen.value = false
+  sendSending.value = false
+  fetching.value = false
+  sendNotice.value = ''
+  pendingSendStatus.value = ''
+  sendEmail.value = ''
+  Object.assign(sendForm, { nickname: '', recipient: '', subject: '', body: '' })
+  pendingSendID.value = readPendingSend()
+  if (pendingSendID.value) pendingSendStatus.value = 'running'
   if (!cardKey.value) {
     pageError.value = '卡密不能为空'
     return
@@ -134,10 +171,13 @@ async function loadInfo() {
   try {
     if (autoFetchMode.value) {
       info.value = null
-      autoFetchText.value = await getPublicMailPlain(cardKey.value, routeEmail.value || undefined)
+      const text = await getPublicMailPlain(cardKey.value, routeEmail.value || undefined)
+      if (version === viewVersion && !disposed) autoFetchText.value = text
       return
     }
-    info.value = await getPublicMailInfo(cardKey.value)
+    const response = await getPublicMailInfo(cardKey.value)
+    if (version !== viewVersion || disposed) return
+    info.value = response
     emailInput.value = ''
     const autoError = prepareAutoFetch()
     if (autoError) {
@@ -145,6 +185,7 @@ async function loadInfo() {
       return
     }
   } catch (error) {
+    if (version !== viewVersion || disposed) return
     info.value = null
     if (autoFetchMode.value) {
       fetchError.value = error instanceof Error ? error.message : '获取邮件失败'
@@ -152,38 +193,164 @@ async function loadInfo() {
       pageError.value = error instanceof Error ? error.message : '卡密查询失败'
     }
   } finally {
-    loading.value = false
+    if (version === viewVersion && !disposed) {
+      loading.value = false
+      if (!autoFetchMode.value) void refreshOperationState()
+    }
   }
 }
 
 async function fetchMessages() {
-  if (!info.value || info.value.remaining <= 0 || !targetEmail.value || fetching.value) return
+  if (!canFetch.value || !info.value) return
+  const version = viewVersion
   fetching.value = true
   fetchError.value = ''
   try {
     const response = await getPublicMailMessages(cardKey.value, info.value.has_bound_email ? undefined : targetEmail.value)
+    if (version !== viewVersion || disposed) return
     currentMessage.value = response.message_item || response.messages[0] || null
-    info.value = {
-      ...info.value,
-      used_count: response.used_count,
-      remaining: response.remaining,
-    }
+    applyQuota({ ...response, busy: false, operation: '' })
     if (!autoFetchMode.value) {
       showFetchToast(response)
     }
     startCooldown(response.cooldown_seconds || 40)
   } catch (error) {
+    if (version !== viewVersion || disposed) return
     const message = error instanceof Error ? error.message : '获取邮件失败'
     fetchError.value = message
     if (!autoFetchMode.value) {
       appStore.showError(message)
     }
     if (error instanceof PublicMailApiError) {
+      applyQuota(error.data)
       const wait = Number(error.data.wait_seconds) || 0
       if (wait > 0) startCooldown(wait)
     }
   } finally {
-    fetching.value = false
+    if (version === viewVersion && !disposed) fetching.value = false
+  }
+}
+
+function pendingStorageKey() {
+  return `public_mail_send:${cardKey.value.replace(/^keys=/, '')}`
+}
+
+function readPendingSend() {
+  try { return sessionStorage.getItem(pendingStorageKey()) || '' } catch { return '' }
+}
+
+function savePendingSend() {
+  try {
+    if (pendingSendID.value) sessionStorage.setItem(pendingStorageKey(), pendingSendID.value)
+    else sessionStorage.removeItem(pendingStorageKey())
+  } catch { /* The server still protects quota if browser storage is unavailable. */ }
+}
+
+function applyQuota(value: Record<string, unknown>) {
+  if (!info.value || !Number.isFinite(value.remaining) || !Number.isFinite(value.used_count)) return
+  stateVersion++
+  info.value = {
+    ...info.value,
+    remaining: Number(value.remaining), used_count: Number(value.used_count),
+    reserved_count: Number(value.reserved_count) || 0,
+    busy: Boolean(value.busy), operation: value.operation === 'send' ? 'send' : value.operation === 'receive' ? 'receive' : '',
+  }
+}
+
+function openSendModal() {
+  if (!canSend.value) return
+  if (sendEmail.value !== targetEmail.value) {
+    Object.assign(sendForm, { nickname: '', recipient: '', subject: '', body: '' })
+  }
+  sendEmail.value = targetEmail.value
+  sendModalOpen.value = true
+}
+
+function applySendResult(result: PublicMailSendResponse) {
+  applyQuota(result)
+  pendingSendStatus.value = result.status
+  const notification = `${result.request_id}:${result.status}`
+  const notify = notification !== lastSendNotification
+  lastSendNotification = notification
+  if (result.status === 'success' || result.status === 'failed') {
+    pendingSendID.value = ''
+    pendingSendStatus.value = ''
+    sendNotice.value = ''
+    savePendingSend()
+    if (result.status === 'success') {
+      sendModalOpen.value = false
+      Object.assign(sendForm, { nickname: '', recipient: '', subject: '', body: '' })
+      if (notify) appStore.showSuccess(result.message)
+    } else if (notify) appStore.showError(result.message)
+  } else {
+    sendNotice.value = result.message
+    if (result.status === 'unknown' && notify) appStore.showWarning(result.message)
+  }
+}
+
+async function sendMessage() {
+  if (!canSend.value || !info.value) return
+  if (!sendForm.recipient.trim()) { appStore.showError('请填写收件人'); return }
+  const version = viewVersion
+  pendingSendID.value ||= newPublicMailRequestID()
+  savePendingSend()
+  pendingSendStatus.value = 'running'
+  sendSending.value = true
+  sendNotice.value = ''
+  try {
+    const result = await sendPublicMailMessage(cardKey.value, {
+      ...sendForm, email: info.value.has_bound_email ? undefined : sendEmail.value,
+      request_id: pendingSendID.value,
+    })
+    if (version === viewVersion && !disposed) applySendResult(result)
+  } catch (error) {
+    if (version !== viewVersion || disposed) return
+    if (error instanceof PublicMailApiError && ['running', 'success', 'failed', 'unknown'].includes(String(error.data.status))) {
+      applySendResult(error.data as PublicMailSendResponse)
+    } else if (error instanceof PublicMailApiError && error.status >= 400 && error.status < 500 && error.status !== 408 && !error.message.includes('请求标识已用于')) {
+      applyQuota(error.data)
+      pendingSendID.value = ''
+      pendingSendStatus.value = ''
+      savePendingSend()
+      appStore.showError(error.message)
+    } else {
+      // Query the same identifier after a transport/proxy failure. Never
+      // assume that a lost HTTP response means the email was not sent.
+      sendNotice.value = '正在查询发送结果，请勿重复提交'
+      appStore.showWarning(sendNotice.value)
+    }
+  } finally {
+    if (version === viewVersion && !disposed) {
+      sendSending.value = false
+      void refreshOperationState()
+    }
+  }
+}
+
+async function refreshOperationState() {
+  if (disposed || autoFetchMode.value || loading.value || !info.value || refreshingState) return
+  refreshingState = true
+  const version = viewVersion
+  const revision = stateVersion
+  try {
+    const latest = await getPublicMailInfo(cardKey.value)
+    if (version !== viewVersion || disposed) return
+    if (revision === stateVersion) info.value = latest
+    if (pendingSendID.value && !sendSending.value) {
+      const requestID = pendingSendID.value
+      const result = await getPublicMailSendStatus(cardKey.value, requestID)
+      if (version === viewVersion && !disposed && pendingSendID.value === requestID && !sendSending.value) applySendResult(result)
+    }
+  } catch (error) {
+    if (version !== viewVersion || disposed) return
+    if (error instanceof PublicMailApiError && error.status === 404 && pendingSendID.value) {
+      // A manual retry keeps the same identifier, including after a refresh.
+      // A delayed original POST therefore cannot create a second delivery.
+      pendingSendStatus.value = ''
+      sendNotice.value = '暂未查询到发送记录，可稍后重试'
+    }
+  } finally {
+    refreshingState = false
   }
 }
 
@@ -309,7 +476,7 @@ function startCooldown(seconds: number) {
             </div>
             <label v-if="!info.has_bound_email" class="public-mail-field">
               <span class="public-mail-field-label">邮箱账号</span>
-              <input v-model.trim="emailInput" class="public-mail-input" type="email" placeholder="请输入邮箱账号" @keyup.enter="fetchMessages" />
+              <input v-model.trim="emailInput" class="public-mail-input" type="email" placeholder="请输入邮箱账号" :disabled="operationBusy" @keyup.enter="fetchMessages" />
             </label>
 
             <div class="public-mail-action-zone" :class="{ 'has-copy': info.has_bound_email }">
@@ -320,7 +487,12 @@ function startCooldown(seconds: number) {
                 </button>
                 <button class="public-mail-fetch" type="button" :disabled="!canFetch" @click="fetchMessages">
                   <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': fetching }" />
-                  <span>{{ info.remaining <= 0 ? '次数已用完' : fetching ? '获取中...' : cooldown > 0 ? `${cooldown}s` : '获取邮件' }}</span>
+                  <span>{{ info.remaining <= 0 ? (info.reserved_count ? '次数已预留' : '次数已用完') : fetching ? '获取中...' : cooldown > 0 ? `${cooldown}s` : '获取邮件' }}</span>
+                </button>
+                <button class="public-mail-fetch public-mail-send" type="button" :disabled="!canSend" @click="openSendModal">
+                  <Loader2 v-if="sendInProgress || info.busy && info.operation === 'send'" class="h-4 w-4 animate-spin" />
+                  <Send v-else class="h-4 w-4" />
+                  <span>{{ sendInProgress || info.busy && info.operation === 'send' ? '发送中...' : '发送邮件' }}</span>
                 </button>
               </div>
             </div>
@@ -347,6 +519,8 @@ function startCooldown(seconds: number) {
         </section>
       </template>
     </section>
+    <MailSendModal :open="sendModalOpen" :form="sendForm" :sending="sendInProgress" :disabled="!canSend" :notice="sendNotice"
+      @update:form="Object.assign(sendForm, $event)" @close="sendModalOpen = false" @send="sendMessage" />
   </main>
 </template>
 
@@ -1016,13 +1190,15 @@ function startCooldown(seconds: number) {
 
   .public-mail-actions {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr));
     width: 100%;
   }
 
   .public-mail-copy,
   .public-mail-fetch {
     width: 100%;
+    min-width: 0;
+    padding-inline: 0.5rem;
   }
 
   .public-mail-content {

@@ -4,7 +4,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RefreshCw, Search, Trash2, X } from 'lucide-vue-next'
 import PaginationBar from '../components/PaginationBar.vue'
 import { getAdminSettings, updateAdminSettings } from '../api/adminSettings'
-import { clearCardKeyUseLogs, listCardKeyUseLogs, type CardKeyUseLog, type CardKeyUseLogListResponse } from '../api/cardKeyLogs'
+import { clearCardKeyUseLogs, listCardKeyUseLogs, resolveCardKeyMailSend, type CardKeyUseLog, type CardKeyUseLogListResponse } from '../api/cardKeyLogs'
 import { useAppStore } from '../stores/app'
 
 type CardKeyLogsCache = {
@@ -41,6 +41,8 @@ const total = ref(0)
 const loading = ref(false)
 const refreshing = ref(false)
 const clearing = ref(false)
+const resolveTarget = ref<CardKeyUseLog | null>(null)
+const resolving = ref(false)
 const cleanupSaving = ref(false)
 const logsCacheRestored = ref(false)
 const logsTableShellRef = ref<HTMLElement | null>(null)
@@ -51,6 +53,25 @@ let mountedReady = false
 let logsPageBeforeSearch = 1
 let logsScrollTopBeforeSearch = 0
 let pendingLogsScrollRestore: number | undefined
+
+function sendStatusText(status: CardKeyUseLog['operation_status']) {
+  return status === 'success' ? '成功' : status === 'failed' ? '失败' : status === 'running' ? '发送中' : '待确认'
+}
+
+async function confirmSendResult(status: 'success' | 'failed') {
+  if (!resolveTarget.value?.operation_id || resolving.value) return
+  resolving.value = true
+  try {
+    await resolveCardKeyMailSend(resolveTarget.value.operation_id, status)
+    resolveTarget.value = null
+    appStore.showSuccess(status === 'success' ? '已确认发送成功并结算 1 次' : '已确认发送失败，预留次数已释放')
+    await refreshLogs()
+  } catch (error) {
+    appStore.showError(error instanceof Error ? error.message : '确认发送结果失败')
+  } finally {
+    resolving.value = false
+  }
+}
 
 function normalizePageSize(value: unknown, fallback = fallbackTablePageSize) {
   const size = Math.floor(Number(value))
@@ -293,7 +314,7 @@ async function saveCleanupDays() {
 async function handleClearLogs() {
   const confirmed = await appStore.showConfirm({
     title: '清空日志',
-    message: '确定要清空全部卡密使用日志吗？',
+    message: '确定要清理已完成的卡密使用日志吗？发送中及待确认的记录会保留。',
     confirmText: '清空',
     cancelText: '取消',
     tone: 'danger',
@@ -303,7 +324,7 @@ async function handleClearLogs() {
   clearing.value = true
   try {
     const result = await clearCardKeyUseLogs()
-    appStore.showSuccess(`已清空 ${result.count || 0} 条日志`)
+    appStore.showSuccess(`已清理 ${result.count || 0} 条日志，发送中及待确认记录保留`)
     page.value = 1
     logs.value = []
     total.value = 0
@@ -396,7 +417,7 @@ onBeforeUnmount(() => {
             <tr>
               <th class="card-key-use-logs-head-cell card-key-use-logs-col-key">卡密</th>
               <th class="card-key-use-logs-head-cell card-key-use-logs-col-email">绑定邮箱</th>
-              <th class="card-key-use-logs-head-cell card-key-use-logs-col-subject">邮件标题</th>
+              <th class="card-key-use-logs-head-cell card-key-use-logs-col-subject">邮件操作日志</th>
               <th class="card-key-use-logs-head-cell card-key-use-logs-col-ip">使用IP</th>
               <th class="card-key-use-logs-head-cell card-key-use-logs-col-time">使用时间</th>
             </tr>
@@ -405,7 +426,16 @@ onBeforeUnmount(() => {
             <tr v-for="item in logs" :key="item.id" class="hover:bg-primary-50/70 dark:hover:bg-primary-900/10">
               <td class="font-mono text-sm">{{ item.card_key }}</td>
               <td>{{ item.bound_email || '-' }}</td>
-              <td>{{ item.mail_subject || '-' }}</td>
+              <td class="mail-operation-log">
+                <template v-if="item.operation_type === 'send'">
+                  <span>【发送邮件】{{ item.recipient || '-' }}，{{ item.mail_subject || '无主题' }}，</span>
+                  <button v-if="item.operation_status === 'unknown' && item.operation_id" type="button"
+                    class="mail-operation-status status-unknown status-action" :title="item.error_message || '核对发件结果后点击确认'"
+                    @click="resolveTarget = item">待确认</button>
+                  <span v-else class="mail-operation-status" :class="`status-${item.operation_status || 'unknown'}`" :title="item.error_message || undefined">{{ sendStatusText(item.operation_status) }}</span>
+                </template>
+                <template v-else>【收取邮件】{{ item.mail_subject || '-' }}</template>
+              </td>
               <td>{{ item.user_ip || '-' }}</td>
               <td>{{ item.used_at || '-' }}</td>
             </tr>
@@ -431,9 +461,35 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </section>
+  <Teleport to="body">
+    <div v-if="resolveTarget" class="mail-result-confirm-mask" @keydown.esc="!resolving && (resolveTarget = null)">
+      <section class="mail-result-confirm rounded-2xl border border-gray-200 bg-white p-6 shadow-xl dark:border-dark-700 dark:bg-dark-900"
+        role="dialog" aria-modal="true" aria-label="确认发件结果">
+        <h3 class="text-base font-bold text-gray-900 dark:text-white">确认发件结果</h3>
+        <p class="mt-3 break-all text-sm text-gray-600 dark:text-dark-300">{{ resolveTarget.recipient }} · {{ resolveTarget.mail_subject || '无主题' }}</p>
+        <p class="my-4 text-sm text-gray-600 dark:text-dark-300">请先核对发件邮箱或服务器记录。确认成功会结算 1 次，确认失败会释放预留次数；这里不会重新发送邮件。</p>
+        <div class="flex flex-wrap justify-end gap-2">
+          <button class="btn btn-secondary" type="button" :disabled="resolving" @click="resolveTarget = null">取消</button>
+          <button class="btn btn-secondary" type="button" :disabled="resolving" @click="confirmSendResult('failed')">确认失败</button>
+          <button class="btn btn-primary" type="button" :disabled="resolving" @click="confirmSendResult('success')">确认成功</button>
+        </div>
+      </section>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
+.card-key-use-logs-table td.mail-operation-log { overflow-wrap: anywhere; white-space: normal; }
+.mail-operation-status { display: inline; font-weight: 700; white-space: nowrap; }
+.status-success { color: #16a34a; }
+.status-failed { color: #dc2626; }
+.status-unknown, .status-running { color: #b7790b; }
+:global(.dark) .status-success { color: #4ade80; }
+:global(.dark) .status-failed { color: #f87171; }
+:global(.dark) .status-unknown, :global(.dark) .status-running { color: #facc15; }
+.status-action { text-decoration: underline; text-underline-offset: .2em; }
+.mail-result-confirm-mask { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 1rem; background: rgb(0 0 0 / .45); backdrop-filter: blur(4px); }
+.mail-result-confirm { width: min(30rem, 100%); max-height: calc(100dvh - 2rem); overflow: auto; }
 .card-key-use-logs-page {
   display: flex;
   height: calc(100vh - 8rem);

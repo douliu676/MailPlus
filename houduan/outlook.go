@@ -1660,7 +1660,7 @@ func exchangeOutlookAuthCode(ctx context.Context, clientID string, code string, 
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
-	form.Set("scope", "Mail.ReadWrite offline_access")
+	form.Set("scope", "Mail.ReadWrite Mail.Send offline_access")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, microsoftTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return outlookTokenResponse{}, err

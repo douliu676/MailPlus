@@ -1057,6 +1057,8 @@ func main() {
 			publicAPI.GET("/mail/:key/all", state.getPublicMailPlain)
 			publicAPI.GET("/mail/:key/all/*email", state.getPublicMailPlain)
 			publicAPI.POST("/mail/:key/messages", state.getPublicMailMessages)
+			publicAPI.POST("/mail/:key/send", state.sendPublicMail)
+			publicAPI.GET("/mail/:key/send/:requestID", state.getPublicMailSendStatus)
 		}
 		userAPI := api.Group("/user", state.authMiddleware())
 		{
@@ -1107,6 +1109,7 @@ func main() {
 			adminAPI.PUT("/card-keys/:id", state.updateCardKey)
 			adminAPI.DELETE("/card-keys/:id", state.deleteCardKey)
 			adminAPI.GET("/card-key-logs", state.listCardKeyUseLogs)
+			adminAPI.POST("/card-key-mail-operations/:operationID/resolve", state.resolvePublicMailSend)
 			adminAPI.DELETE("/card-key-logs", state.clearCardKeyUseLogs)
 			adminAPI.GET("/mail-groups", state.listMailGroups)
 			adminAPI.POST("/mail-groups", state.createMailGroup)
@@ -5459,6 +5462,10 @@ func sendMailAccountMessage(ctx context.Context, account mailAccountTestConfig, 
 		return fmt.Errorf("收件人地址格式错误")
 	}
 
+	message, err := buildSMTPMessage(account, req, strings.Join(toHeaders, ", "))
+	if err != nil {
+		return err
+	}
 	client, err := openMailAccountSMTPClient(ctx, account)
 	if err != nil {
 		return err
@@ -5477,19 +5484,18 @@ func sendMailAccountMessage(ctx context.Context, account mailAccountTestConfig, 
 	if err != nil {
 		return err
 	}
-	message, err := buildSMTPMessage(account, req, strings.Join(toHeaders, ", "))
-	if err != nil {
-		_ = writer.Close()
-		return err
-	}
 	if _, err := writer.Write(message); err != nil {
-		_ = writer.Close()
+		// Do not terminate DATA after a write error: that could submit a
+		// truncated message. Closing the connection aborts this transaction.
 		return err
 	}
 	if err := writer.Close(); err != nil {
-		return err
+		return classifySMTPCompletionError(err)
 	}
-	return client.Quit()
+	// DATA's final 250 is the acceptance boundary. A failed QUIT cannot
+	// turn an accepted message into a failed send or trigger a free retry.
+	_ = client.Quit()
+	return nil
 }
 
 func openMailAccountSMTPClient(ctx context.Context, account mailAccountTestConfig) (*smtp.Client, error) {
@@ -5499,6 +5505,7 @@ func openMailAccountSMTPClient(ctx context.Context, account mailAccountTestConfi
 	if err != nil {
 		return nil, err
 	}
+	conn = bindSMTPConnectionContext(ctx, conn)
 	client, err := smtp.NewClient(conn, strings.TrimSpace(account.SMTPHost))
 	if err != nil {
 		_ = conn.Close()

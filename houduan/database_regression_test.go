@@ -25,6 +25,18 @@ import (
 // dedicated local test database; production DATABASE_URL is never consumed.
 func regressionDatabase(t *testing.T) (*sql.DB, string) {
 	t.Helper()
+	db, dsn := regressionDatabaseLegacy(t)
+	if err := ensureCardKeyMailLogColumns(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePublicMailOperationTables(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	return db, dsn
+}
+
+func regressionDatabaseLegacy(t *testing.T) (*sql.DB, string) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	raw := os.Getenv("MAILPLUS_TEST_DATABASE_URL")
 	if raw == "" {
@@ -68,7 +80,8 @@ CREATE TABLE mail_servers(id SERIAL PRIMARY KEY,name TEXT NOT NULL,imap_host TEX
 CREATE TABLE mail_accounts(id SERIAL PRIMARY KEY,group_id INTEGER NOT NULL,server_id INTEGER NOT NULL,email TEXT NOT NULL UNIQUE,password TEXT NOT NULL,imap_host TEXT NOT NULL,smtp_host TEXT NOT NULL,imap_protocol TEXT NOT NULL,imap_port INTEGER NOT NULL,imap_ssl BOOLEAN NOT NULL,smtp_protocol TEXT NOT NULL,smtp_port INTEGER NOT NULL,smtp_ssl BOOLEAN NOT NULL,remark TEXT NOT NULL,status TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE outlook_accounts(id SERIAL PRIMARY KEY,group_id INTEGER NOT NULL,email TEXT NOT NULL UNIQUE,password TEXT NOT NULL,client_id TEXT NOT NULL,refresh_token TEXT NOT NULL,remark TEXT NOT NULL,status TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE card_keys(id SERIAL PRIMARY KEY,key TEXT NOT NULL UNIQUE,status TEXT NOT NULL DEFAULT 'unused',usage_limit INTEGER NOT NULL,mail_days INTEGER NOT NULL DEFAULT 0,mail_keyword TEXT NOT NULL DEFAULT '',bound_email TEXT NOT NULL DEFAULT '',used_by TEXT NOT NULL DEFAULT '',used_at TIMESTAMPTZ,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
-CREATE TABLE card_key_mail_access_records(card_key_id INTEGER NOT NULL,email TEXT NOT NULL,client_key TEXT NOT NULL,client_ip TEXT NOT NULL DEFAULT '',last_request_at TIMESTAMPTZ,last_message_key TEXT NOT NULL DEFAULT '',charged_count INTEGER NOT NULL DEFAULT 0,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(card_key_id,email,client_key));`
+CREATE TABLE card_key_mail_access_records(card_key_id INTEGER NOT NULL,email TEXT NOT NULL,client_key TEXT NOT NULL,client_ip TEXT NOT NULL DEFAULT '',last_request_at TIMESTAMPTZ,last_message_key TEXT NOT NULL DEFAULT '',charged_count INTEGER NOT NULL DEFAULT 0,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(card_key_id,email,client_key));
+CREATE TABLE card_key_use_logs(id SERIAL PRIMARY KEY,card_key_id INTEGER NOT NULL DEFAULT 0,card_key TEXT NOT NULL DEFAULT '',bound_email TEXT NOT NULL DEFAULT '',mail_subject TEXT NOT NULL DEFAULT '',user_ip TEXT NOT NULL DEFAULT '',used_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`
 	if _, err := db.Exec(ddl); err != nil {
 		t.Fatal(err)
 	}

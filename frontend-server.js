@@ -10,6 +10,7 @@ const webRoot = process.env.WEB_ROOT || path.join(__dirname, 'web')
 const backendURL = new URL(process.env.BACKEND_URL || 'http://127.0.0.1:4400')
 const requestTimeoutMs = Number(process.env.FRONTEND_REQUEST_TIMEOUT_MS || 30000)
 const quickMailRequestTimeoutMs = Number(process.env.FRONTEND_QUICK_MAIL_REQUEST_TIMEOUT_MS || process.env.FRONTEND_REQUEST_TIMEOUT_MS || 110000)
+const publicMailRequestTimeoutMs = Number(process.env.FRONTEND_PUBLIC_MAIL_REQUEST_TIMEOUT_MS || process.env.FRONTEND_REQUEST_TIMEOUT_MS || 110000)
 const maxRequestURLLength = Number(process.env.FRONTEND_MAX_URL_LENGTH || 8192)
 
 const mimeTypes = {
@@ -38,6 +39,10 @@ function isQuickMailPlainPath(pathname) {
 
 function isQuickMailAPIPath(pathname) {
   return /^\/api\/admin\/quick-mail\/(?:imap|outlook)\/(?:receive|detail)\/?$/.test(pathname)
+}
+
+function isPublicMailOperationPath(pathname) {
+  return /^\/api\/public\/mail\/[^/]+\/(?:messages|send|all(?:\/[^/]+)?)\/?$/.test(pathname)
 }
 
 function parseRequestURL(req, baseURL) {
@@ -141,9 +146,13 @@ function proxyRequest(req, res, rewritePath) {
     sendJSON(res, 502, { code: 502, msg: `Backend service is temporarily unavailable: ${error.message}`, data: null })
   })
 
-  upstream.setTimeout(isQuickMailAPIPath(target.pathname) || isQuickMailPlainPath(target.pathname)
-    ? quickMailRequestTimeoutMs
-    : requestTimeoutMs)
+  let timeoutMs = requestTimeoutMs
+  if (isPublicMailOperationPath(target.pathname)) {
+    timeoutMs = publicMailRequestTimeoutMs
+  } else if (isQuickMailAPIPath(target.pathname) || isQuickMailPlainPath(target.pathname)) {
+    timeoutMs = quickMailRequestTimeoutMs
+  }
+  upstream.setTimeout(timeoutMs)
 
   // Once a POST body has been sent, cancellation is observed on the response.
   res.on('close', () => {

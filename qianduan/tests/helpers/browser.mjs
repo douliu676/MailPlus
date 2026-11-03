@@ -20,7 +20,10 @@ export async function connectDebugger(url) {
   })
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(String(event.data))
-    if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails.text)
+    if (message.method === 'Runtime.exceptionThrown') {
+      const details = message.params.exceptionDetails
+      exceptions.push(details.exception?.description || JSON.stringify(details))
+    }
     const waiting = pending.get(message.id)
     if (!waiting) return
     pending.delete(message.id)

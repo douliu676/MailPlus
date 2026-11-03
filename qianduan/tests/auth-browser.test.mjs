@@ -58,6 +58,10 @@ test('backend login survives open IMAP/Outlook pages and a delayed previous-sess
   server = createServer(async (request, response) => {
     try {
       const pathname = new URL(request.url, 'http://127.0.0.1').pathname
+      if (pathname === '/api/settings/bootstrap.js') {
+        response.writeHead(200, { 'Content-Type': 'text/javascript' })
+        response.end('window.__APP_PUBLIC_SETTINGS__=' + JSON.stringify({ site_name: 'MailPlus fixture' })); return
+      }
       if (pathname === '/api/auth/login') {
         request.resume()
         activeToken = 'fixture-login-' + (++loginCount)

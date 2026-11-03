@@ -37,6 +37,9 @@ type publicMailInfoResponse struct {
 	MailDays        int    `json:"mail_days"`
 	MailKeyword     string `json:"mail_keyword"`
 	CooldownSeconds int    `json:"cooldown_seconds"`
+	ReservedCount   int    `json:"reserved_count"`
+	Busy            bool   `json:"busy"`
+	Operation       string `json:"operation"`
 }
 
 type publicMailMessagesRequest struct {
@@ -71,6 +74,7 @@ type publicMailMessagesResponse struct {
 	WaitSeconds     int                 `json:"wait_seconds"`
 	CooldownSeconds int                 `json:"cooldown_seconds"`
 	Message         string              `json:"message"`
+	ReservedCount   int                 `json:"reserved_count"`
 }
 
 type publicCardKey struct {
@@ -130,7 +134,7 @@ CREATE TABLE IF NOT EXISTS card_key_mail_access_records (
 			return err
 		}
 	}
-	return nil
+	return ensurePublicMailOperationTables(ctx, db)
 }
 
 func (s *appState) getPublicMailInfo(c *gin.Context) {
@@ -138,12 +142,20 @@ func (s *appState) getPublicMailInfo(c *gin.Context) {
 	if !ok {
 		return
 	}
-	usedCount, err := publicMailUsedCount(c.Request.Context(), card.ID)
+	db, err := sql.Open("postgres", databaseURL())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "查询卡密失败"})
 		return
 	}
-	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: publicMailInfo(card, usedCount), Msg: "ok"})
+	defer db.Close()
+	card, quota, err := loadPublicMailSnapshot(c.Request.Context(), db, card)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "查询卡密失败"})
+		return
+	}
+	info := publicMailInfo(card, quota.UsedCount)
+	info.Remaining, info.ReservedCount, info.Busy, info.Operation = quota.Remaining, quota.ReservedCount, quota.Busy, quota.Operation
+	c.JSON(http.StatusOK, apiResponse{Code: 0, Data: info, Msg: "ok"})
 }
 
 func (s *appState) getPublicMailMessages(c *gin.Context) {
@@ -184,15 +196,9 @@ func (s *appState) fetchPublicMailMessagesForRequest(c *gin.Context, requestedEm
 		return publicMailMessagesResponse{}, status, message, nil, false
 	}
 
-	email := strings.ToLower(strings.TrimSpace(requestedEmail))
-	if card.BoundEmail != "" {
-		if email != "" && !strings.EqualFold(email, card.BoundEmail) {
-			return publicMailMessagesResponse{}, http.StatusBadRequest, "链接中的邮箱与卡密绑定邮箱不匹配", nil, false
-		}
-		email = card.BoundEmail
-	}
-	if email == "" || !strings.Contains(email, "@") {
-		return publicMailMessagesResponse{}, http.StatusBadRequest, "请输入邮箱地址", nil, false
+	email, err := resolvePublicMailEmail(card, requestedEmail)
+	if err != nil {
+		return publicMailMessagesResponse{}, http.StatusBadRequest, err.Error(), nil, false
 	}
 
 	clientKey := publicMailClientKey(c, email)
@@ -204,8 +210,17 @@ func (s *appState) fetchPublicMailMessagesForRequest(c *gin.Context, requestedEm
 	}
 	defer db.Close()
 
-	ctx := c.Request.Context()
-	record, usedCount, wait, err := beginPublicMailRead(ctx, db, card, email, clientKey, clientIP)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), publicMailOperationTimeout)
+	defer cancel()
+	op, card, quota, _, err := beginPublicMailOperation(ctx, db, card, publicMailOperation{
+		RequestID: newToken(), Kind: "receive", Email: email, UserIP: clientIP,
+	})
+	if err != nil {
+		status, message, data := publicMailOperationErrorResponse(err)
+		return publicMailMessagesResponse{}, status, message, data, false
+	}
+	defer releasePublicMailRead(db, op)
+	record, _, wait, err := beginPublicMailRead(ctx, db, card, email, clientKey, clientIP)
 	if err != nil {
 		return publicMailMessagesResponse{}, http.StatusForbidden, err.Error(), nil, false
 	}
@@ -226,13 +241,17 @@ func (s *appState) fetchPublicMailMessagesForRequest(c *gin.Context, requestedEm
 	}
 	charged := false
 	repeated := latestKey != "" && latestKey == record.LastMessageKey
-	if latestKey != "" {
-		usedCount, charged, err = chargePublicMailUsage(ctx, db, card, email, clientKey, latestKey, usedCount)
-		repeated = !charged
-		if err != nil {
-			return publicMailMessagesResponse{}, http.StatusForbidden, err.Error(), nil, false
-		}
+	latestSubject := ""
+	if latestMessage != nil {
+		latestSubject = latestMessage.Subject
 	}
+	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer settleCancel()
+	quota, charged, err = finishPublicMailRead(settleCtx, db, card, op, clientKey, latestKey, latestSubject)
+	if err != nil {
+		return publicMailMessagesResponse{}, http.StatusInternalServerError, "记录收件结果失败，请稍后重试", nil, false
+	}
+	repeated = latestKey != "" && !charged
 
 	responseMessage := "未获取到符合条件的邮件"
 	if len(messages) > 0 {
@@ -243,19 +262,15 @@ func (s *appState) fetchPublicMailMessagesForRequest(c *gin.Context, requestedEm
 			responseMessage = "获取到新邮件，已扣除一次"
 		}
 	}
-	latestSubject := ""
-	if latestMessage != nil {
-		latestSubject = latestMessage.Subject
-	}
-	_ = recordCardKeyUseAttempt(ctx, db, card.ID, card.Key, email, latestSubject, clientIP)
 	return publicMailMessagesResponse{
 		Email:           email,
 		Messages:        messages,
 		MessageItem:     latestMessage,
 		Charged:         charged,
 		Repeated:        repeated,
-		UsedCount:       usedCount,
-		Remaining:       publicMailRemaining(card, usedCount),
+		UsedCount:       quota.UsedCount,
+		Remaining:       quota.Remaining,
+		ReservedCount:   quota.ReservedCount,
 		WaitSeconds:     publicMailCooldownSeconds,
 		CooldownSeconds: publicMailCooldownSeconds,
 		Message:         responseMessage,

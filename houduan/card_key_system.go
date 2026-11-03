@@ -70,12 +70,17 @@ type cardKeyListResponse struct {
 }
 
 type cardKeyUseLogResponse struct {
-	ID          int    `json:"id"`
-	CardKey     string `json:"card_key"`
-	BoundEmail  string `json:"bound_email"`
-	MailSubject string `json:"mail_subject"`
-	UserIP      string `json:"user_ip"`
-	UsedAt      string `json:"used_at"`
+	ID              int    `json:"id"`
+	CardKey         string `json:"card_key"`
+	BoundEmail      string `json:"bound_email"`
+	MailSubject     string `json:"mail_subject"`
+	UserIP          string `json:"user_ip"`
+	UsedAt          string `json:"used_at"`
+	OperationType   string `json:"operation_type"`
+	OperationStatus string `json:"operation_status"`
+	Recipient       string `json:"recipient"`
+	ErrorMessage    string `json:"error_message"`
+	OperationID     string `json:"operation_id,omitempty"`
 }
 
 type cardKeyUseLogListResponse struct {
@@ -222,6 +227,9 @@ CREATE TABLE IF NOT EXISTS card_key_use_logs (
 		_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS card_keys_remark_trgm_idx ON card_keys USING gin (remark gin_trgm_ops)`)
 		_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS card_key_use_logs_card_key_trgm_idx ON card_key_use_logs USING gin (card_key gin_trgm_ops)`)
 		_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS card_key_use_logs_bound_email_trgm_idx ON card_key_use_logs USING gin (bound_email gin_trgm_ops)`)
+	}
+	if err := ensureCardKeyMailLogColumns(ctx, db); err != nil {
+		return err
 	}
 	return normalizeCardKeyGroupSortOrders(ctx, db)
 }
@@ -468,6 +476,10 @@ func (s *appState) listCardKeyUseLogs(c *gin.Context) {
 	defer db.Close()
 
 	_ = s.clearExpiredCardKeyUseLogs(c.Request.Context())
+	if err := recoverPublicMailLogOperations(c.Request.Context(), db); err != nil {
+		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "更新发件状态失败，请稍后重试"})
+		return
+	}
 
 	search := strings.TrimSpace(c.Query("search"))
 	page, pageSize, offset := parseListPage(c, 20, 500)
@@ -489,7 +501,8 @@ func (s *appState) listCardKeyUseLogs(c *gin.Context) {
 	queryArgs := append([]interface{}{}, args...)
 	queryArgs = append(queryArgs, pageSize, offset)
 	rows, err := db.QueryContext(c.Request.Context(), `
-SELECT id, card_key, bound_email, mail_subject, user_ip, used_at
+SELECT id, card_key, bound_email, mail_subject, user_ip, used_at,
+       operation_type, operation_status, recipient, error_message, COALESCE(operation_id,'')
 FROM card_key_use_logs
 WHERE `+whereSQL+`
 ORDER BY used_at DESC, id DESC
@@ -505,7 +518,8 @@ LIMIT $`+strconv.Itoa(limitIndex)+` OFFSET $`+strconv.Itoa(offsetIndex)+`
 	for rows.Next() {
 		var item cardKeyUseLogResponse
 		var usedAt time.Time
-		if err := rows.Scan(&item.ID, &item.CardKey, &item.BoundEmail, &item.MailSubject, &item.UserIP, &usedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.CardKey, &item.BoundEmail, &item.MailSubject, &item.UserIP, &usedAt,
+			&item.OperationType, &item.OperationStatus, &item.Recipient, &item.ErrorMessage, &item.OperationID); err != nil {
 			c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "读取卡密日志失败"})
 			return
 		}
@@ -534,7 +548,7 @@ func (s *appState) clearCardKeyUseLogs(c *gin.Context) {
 	}
 	defer db.Close()
 
-	result, err := db.ExecContext(c.Request.Context(), `DELETE FROM card_key_use_logs`)
+	result, err := db.ExecContext(c.Request.Context(), `DELETE FROM card_key_use_logs WHERE operation_type<>'send' OR operation_status NOT IN ('running','unknown')`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, apiResponse{Code: 500, Msg: "清空卡密日志失败"})
 		return
@@ -1194,6 +1208,7 @@ func cleanupCardKeyUseLogsWithDB(ctx context.Context, db *sql.DB, days int) erro
 	_, err := db.ExecContext(ctx, `
 DELETE FROM card_key_use_logs
 WHERE used_at <= NOW() - ($1::int * INTERVAL '1 day')
+  AND (operation_type<>'send' OR operation_status NOT IN ('running','unknown'))
 `, days)
 	return err
 }

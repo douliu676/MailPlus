@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MailSendModal from '../components/MailSendModal.vue'
 import { createAuthCacheGuard } from '../api/session'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useQueryClient } from '@tanstack/vue-query'
@@ -1323,6 +1324,10 @@ async function testSelectedMailAccountsV2() {
 }
 
 function openMailSendEntry(item: MailAccount) {
+  if (sendSending.value) {
+    appStore.showInfo('邮件正在发送，请稍后')
+    return
+  }
   activeMailMenuID.value = null
   sendTarget.value = item
   sendForm.nickname = ''
@@ -2670,40 +2675,8 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="sendModalOpen && sendTarget" class="mail-modal-mask center-mail-modal">
-        <div class="mail-send-modal scrollable-mail-modal overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl dark:border-dark-700 dark:bg-dark-900">
-          <div class="shrink-0 flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-dark-700">
-            <h3 class="text-base font-bold text-gray-900 dark:text-white">发送邮件</h3>
-            <button class="modal-close-button" type="button" @click="sendModalOpen = false">
-              <X class="h-5 w-5" />
-            </button>
-          </div>
-          <div class="mail-modal-scroll-body grid gap-4 p-6">
-            <label>
-              <span class="input-label">昵称</span>
-              <input v-model.trim="sendForm.nickname" class="input" placeholder="收件人看到的发件人昵称（可选）" />
-            </label>
-            <label>
-              <span class="input-label">收件人 *</span>
-              <input v-model.trim="sendForm.recipient" class="input" placeholder="例: target@example.com" />
-            </label>
-            <label>
-              <span class="input-label">主题</span>
-              <input v-model.trim="sendForm.subject" class="input" placeholder="邮件主题" />
-            </label>
-            <label>
-              <span class="input-label">正文</span>
-              <textarea v-model="sendForm.body" class="input mail-send-body-textarea" placeholder="邮件正文"></textarea>
-            </label>
-          </div>
-          <div class="shrink-0 flex justify-end gap-3 border-t border-gray-200 px-6 py-4 dark:border-dark-700">
-            <button class="btn btn-secondary" type="button" @click="sendModalOpen = false">取消</button>
-            <button class="btn btn-primary" type="button" :disabled="sendSending" @click="sendMailMessage">
-              {{ sendSending ? '发送中...' : '发送' }}
-            </button>
-          </div>
-        </div>
-      </div>
+      <MailSendModal :open="sendModalOpen && !!sendTarget" :form="sendForm" :sending="sendSending"
+        @update:form="Object.assign(sendForm, $event)" @close="sendModalOpen = false" @send="sendMailMessage" />
 
       <div v-if="remarkModalOpen" class="mail-modal-mask center-mail-modal">
         <div class="remark-modal scrollable-mail-modal overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl dark:border-dark-700 dark:bg-dark-900">
