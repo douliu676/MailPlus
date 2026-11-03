@@ -5374,39 +5374,11 @@ func testSendMailAccount(ctx context.Context, account mailAccountTestConfig) err
 	}
 
 	address := net.JoinHostPort(strings.TrimSpace(account.SMTPHost), strconv.Itoa(account.SMTPPort))
-	smtpProtocol := strings.TrimSpace(account.SMTPProtocol)
-	useStartTLS := strings.EqualFold(smtpProtocol, "SMTP(STARTTLS)")
-	conn, err := dialMailServer(ctx, account.SMTPHost, account.SMTPPort, account.SMTPSSL && !useStartTLS)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	client, err := smtp.NewClient(conn, strings.TrimSpace(account.SMTPHost))
+	client, err := openMailAccountSMTPClient(ctx, account)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-
-	if useStartTLS {
-		if ok, _ := client.Extension("STARTTLS"); !ok {
-			return fmt.Errorf("服务器不支持 STARTTLS")
-		}
-		if err := client.StartTLS(mailTLSConfig(account.SMTPHost)); err != nil {
-			return err
-		}
-	}
-
-	if ok, _ := client.Extension("AUTH"); !ok {
-		return fmt.Errorf("服务器不支持 SMTP AUTH")
-	}
-	auth := smtp.PlainAuth("", strings.TrimSpace(account.Email), account.Password, strings.TrimSpace(account.SMTPHost))
-	if err := client.Auth(auth); err != nil {
-		loginAuth := &smtpLoginAuth{username: strings.TrimSpace(account.Email), password: account.Password}
-		if loginErr := client.Auth(loginAuth); loginErr != nil {
-			return loginErr
-		}
-	}
 	if err := client.Noop(); err != nil {
 		return fmt.Errorf("%s: %w", address, err)
 	}
@@ -5478,17 +5450,20 @@ func sendMailAccountMessage(ctx context.Context, account mailAccountTestConfig, 
 	return nil
 }
 
-func openMailAccountSMTPClient(ctx context.Context, account mailAccountTestConfig) (*smtp.Client, error) {
+func openMailAccountSMTPClient(ctx context.Context, account mailAccountTestConfig) (*smtpContextClient, error) {
 	smtpProtocol := strings.TrimSpace(account.SMTPProtocol)
 	useStartTLS := strings.EqualFold(smtpProtocol, "SMTP(STARTTLS)")
 	conn, err := dialMailServer(ctx, account.SMTPHost, account.SMTPPort, account.SMTPSSL && !useStartTLS)
 	if err != nil {
 		return nil, err
 	}
-	conn = bindSMTPConnectionContext(ctx, conn)
-	client, err := smtp.NewClient(conn, strings.TrimSpace(account.SMTPHost))
+	return authenticateMailSMTPConnection(ctx, conn, account, mailTLSConfig(account.SMTPHost))
+}
+
+func authenticateMailSMTPConnection(ctx context.Context, conn net.Conn, account mailAccountTestConfig, tlsConfig *tls.Config) (*smtpContextClient, error) {
+	useStartTLS := strings.EqualFold(strings.TrimSpace(account.SMTPProtocol), "SMTP(STARTTLS)")
+	client, err := newSMTPContextClient(ctx, conn, strings.TrimSpace(account.SMTPHost))
 	if err != nil {
-		_ = conn.Close()
 		return nil, err
 	}
 	shouldClose := true
@@ -5498,23 +5473,38 @@ func openMailAccountSMTPClient(ctx context.Context, account mailAccountTestConfi
 		}
 	}()
 
+	if err := client.Hello("localhost"); err != nil {
+		return nil, err
+	}
 	if useStartTLS {
 		if ok, _ := client.Extension("STARTTLS"); !ok {
 			return nil, fmt.Errorf("服务器不支持 STARTTLS")
 		}
-		if err := client.StartTLS(mailTLSConfig(account.SMTPHost)); err != nil {
+		if err := client.StartTLS(tlsConfig); err != nil {
 			return nil, err
 		}
 	}
-	if ok, _ := client.Extension("AUTH"); !ok {
+	ok, mechanisms := client.Extension("AUTH")
+	if !ok {
 		return nil, fmt.Errorf("服务器不支持 SMTP AUTH")
 	}
-	auth := smtp.PlainAuth("", strings.TrimSpace(account.Email), account.Password, strings.TrimSpace(account.SMTPHost))
-	if err := client.Auth(auth); err != nil {
-		loginAuth := &smtpLoginAuth{username: strings.TrimSpace(account.Email), password: account.Password}
-		if loginErr := client.Auth(loginAuth); loginErr != nil {
-			return nil, loginErr
+	var auth smtp.Auth
+	for _, mechanism := range strings.Fields(mechanisms) {
+		if strings.EqualFold(mechanism, "PLAIN") {
+			auth = smtp.PlainAuth("", strings.TrimSpace(account.Email), account.Password, strings.TrimSpace(account.SMTPHost))
+			break
 		}
+		if strings.EqualFold(mechanism, "LOGIN") {
+			auth = &smtpLoginAuth{username: strings.TrimSpace(account.Email), password: account.Password}
+		}
+	}
+	if auth == nil {
+		return nil, fmt.Errorf("服务器未提供支持的 SMTP 认证方式（PLAIN 或 LOGIN）")
+	}
+	if err := client.Auth(auth); err != nil {
+		// net/smtp closes the connection on authentication failure. Preserve
+		// that error rather than retrying LOGIN on a closed connection.
+		return nil, err
 	}
 	shouldClose = false
 	return client, nil
@@ -6381,6 +6371,10 @@ func sortReceivedMailMessages(items []receivedMailMessage) {
 }
 
 func (a *smtpLoginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	// Match smtp.PlainAuth's transport protection for password-based LOGIN.
+	if !server.TLS && server.Name != "localhost" && server.Name != "127.0.0.1" && server.Name != "::1" {
+		return "", nil, errors.New("unencrypted connection")
+	}
 	a.step = 0
 	return "LOGIN", nil, nil
 }

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	stdmail "net/mail"
+	"net/smtp"
 	"net/textproto"
 	"strings"
 	"sync"
@@ -213,24 +214,40 @@ func classifySMTPCompletionError(err error) error {
 	return &uncertainMailSendError{cause: err}
 }
 
-type smtpContextConn struct {
-	net.Conn
+type smtpContextClient struct {
+	*smtp.Client
 	stop func() bool
 	once sync.Once
 }
 
-func bindSMTPConnectionContext(ctx context.Context, conn net.Conn) net.Conn {
+func newSMTPContextClient(ctx context.Context, conn net.Conn, host string) (*smtpContextClient, error) {
 	deadline := time.Now().Add(20 * time.Second)
 	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
 		deadline = end
 	}
-	_ = conn.SetDeadline(deadline)
-	return &smtpContextConn{Conn: conn, stop: context.AfterFunc(ctx, func() { _ = conn.Close() })}
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	// net/smtp identifies implicit TLS with a concrete *tls.Conn assertion.
+	// Keep the original connection intact; attach lifecycle cleanup to the
+	// SMTP client instead of hiding TLS behind a net.Conn wrapper.
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		stop()
+		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	return &smtpContextClient{Client: client, stop: stop}, nil
 }
 
-func (c *smtpContextConn) Close() error {
+func (c *smtpContextClient) Close() error {
 	var err error
-	c.once.Do(func() { c.stop(); err = c.Conn.Close() })
+	c.once.Do(func() { c.stop(); err = c.Client.Close() })
 	return err
 }
 

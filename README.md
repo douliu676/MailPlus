@@ -104,6 +104,8 @@ admin / admin123
 
 ### 当前源码修复的本地构建
 
+已同步邮件列表和卡密页的 SMTP 发件修复：保留 SSL 连接的加密状态，按服务器支持的 PLAIN/LOGIN 机制认证，认证失败时保留原始错误，避免在已关闭的连接上重试而显示 `use of closed network connection`。SSL/STARTTLS 的证书校验及卡密扣次规则保持有效，需重新构建并启动镜像后生效。
+
 已同步完整恢复对旧版 `.dump` 的兼容修复。后端校验备份后，在同一事务中清理新增收发操作表并导入备份；SQL 导入失败会回滚，成功后自动重启并补齐新表和日志字段。无效、仅结构或仅数据的备份会提前拒绝。镜像中的 `postgresql18-client` 已包含所需的 `pg_restore` 和 `psql`。
 
 完整恢复接口的转发等待时间默认是 31 分钟，与后端 30 分钟恢复时限配合。可通过 `FRONTEND_DATABASE_RESTORE_TIMEOUT_MS` 覆盖；未设置该值时，显式配置的 `FRONTEND_REQUEST_TIMEOUT_MS` 仍作为全局覆盖值生效。
